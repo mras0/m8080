@@ -17,12 +17,6 @@
 
 // Push: SP[-1] = high, SP[-2] = low, SP -= 2
 
-//      76543210
-// CMC  00111111 ----C F.C=~F.C
-// CMA  00101111 ----- A = ~A
-// DAA  00100111 SZAPC TODO
-// XTHL 11100011 ----- H <=> (SP+1), L <=> (SP)
-
 // rp:
 //   00 = BC
 //   01 = DE
@@ -96,8 +90,11 @@ static_assert(CONDM == 7);
     X(CPE)              \
     X(CP)               \
     X(CM)               \
+    X(CMA)              \
+    X(CMC)              \
     X(CPI)              \
     X(CMP)              \
+    X(DAA)              \
     X(DAD)              \
     X(DCR)              \
     X(DCX)              \
@@ -151,7 +148,8 @@ static_assert(CONDM == 7);
     X(STC)              \
     X(XCHG)             \
     X(XRA)              \
-    X(XRI)
+    X(XRI)              \
+    X(XTHL)
 
 const char* const instruction_names[] = {
 #define INAME(name) #name,
@@ -232,11 +230,15 @@ void init_instructions()
     instructions[0b00011010] /* 1A */ = { LDAX, REGD, NONE };
     instructions[0b00011111] /* 1F */ = { RAR, NONE, NONE };
     instructions[0b00100010] /* 22 */ = { SHLD, IMM16, NONE };
+    instructions[0b00100111] /* 27 */ = { DAA, NONE, NONE };
     instructions[0b00101010] /* 2A */ = { LHLD, IMM16, NONE };
+    instructions[0b00101111] /* 2F */ = { CMA, NONE, NONE };
     instructions[0b00110010] /* 32 */ = { STA, IMM16, NONE }; // STA  00110010 ----- (IMM16) <- A
-    instructions[0b00110111] /* 37 */ = { STC, IMM16, NONE };
+    instructions[0b00110111] /* 37 */ = { STC, NONE, NONE };
     instructions[0b00111010] /* 3A */ = { LDA, IMM16, NONE };
+    instructions[0b00111111] /* 3F */ = { CMC, NONE, NONE };
     instructions[0b01110110] /* 76 */ = { HLT, NONE, NONE };
+    instructions[0b11100011] /* E3 */ = { XTHL, NONE, NONE };
     instructions[0b11101001] /* E9 */ = { PCHL, NONE, NONE };
     instructions[0b11101011] /* EB */ = { XCHG, NONE, NONE };
     instructions[0b11111001] /* F9 */ = { SPHL, NONE, NONE };
@@ -444,6 +446,8 @@ struct machine_state {
     uint8_t regs[8];
     uint16_t sp;
     uint16_t pc;
+    bool inte; // interrupts enabled
+    uint64_t instruction_count;
 };
 
 std::ostream& operator<<(std::ostream& os, const machine_state& state)
@@ -464,6 +468,8 @@ std::ostream& operator<<(std::ostream& os, const machine_state& state)
     os << (psw & af_mask ? 'A' : 'a');
     os << (psw & pf_mask ? 'P' : 'p');
     os << (psw & cf_mask ? 'C' : 'c');
+    os << " INTE=" << static_cast<int>(state.inte);
+    os << " #INS: " << state.instruction_count;
     return os;
 }
 
@@ -668,9 +674,9 @@ private:
         if (carry_mask & 0x80)
             flags |= cf_mask;
         // https://graphics.stanford.edu/~seander/bithacks.html#ParityWith64Bits
-        if ((((val * 0x0101010101010101ULL) & 0x8040201008040201ULL) % 0x1FF) & 1)
-            flags |= pf_mask;
-        if (carry_mask & 0x10)
+        if (!((((val * 0x0101010101010101ULL) & 0x8040201008040201ULL) % 0x1FF) & 1))
+            flags |= pf_mask; // Set for even parity
+        if (carry_mask & 0x08)
             flags |= af_mask;
         if (!val)
             flags |= zf_mask;
@@ -682,15 +688,15 @@ private:
     void dos_call();
 };
 
-constexpr std::pair<uint8_t, uint8_t> add8(uint8_t l, uint8_t r)
+constexpr std::pair<uint8_t, uint8_t> add8(uint8_t l, uint8_t r, uint8_t carry = 0)
 {
-    const uint8_t res = l + r;
+    const uint8_t res = l + r + !!carry;
     return { res, static_cast<uint8_t>((l & r) | ((l | r) & ~res)) };
 }
 
-constexpr std::pair<uint8_t, uint8_t> sub8(uint8_t l, uint8_t r)
+constexpr std::pair<uint8_t, uint8_t> sub8(uint8_t l, uint8_t r, uint8_t carry = 0)
 {
-    const uint8_t res = l - r;
+    const uint8_t res = l - r - !!carry;
     return { res, static_cast<uint8_t>((~l & r) | (~(l ^ r) & res)) };
 }
 
@@ -699,17 +705,47 @@ void machine::step()
     if (trace_)
         disasm_one(*trace_, mem_, state_.pc);
 
+    ++state_.instruction_count;
+
+    const auto start_pc = state_.pc;
     const auto inst_num = pc_read();
     const auto& inst = instructions[inst_num];
     const auto a0 = inst.args[0];
     const auto a1 = inst.args[1];
 
+    static constexpr uint8_t alu_all_mask = sf_mask | zf_mask | af_mask | pf_mask | cf_mask;
     switch (inst.type) {
+    case ACI: {
+        const auto [res, carry] = add8(state_.regs[A], pc_read(), state_.regs[PSW] & cf_mask);
+        set_flags(res, carry, alu_all_mask);
+        state_.regs[A] = res;
+        break;
+    }
+    case ADI: {
+        const auto [res, carry] = add8(state_.regs[A], pc_read());
+        set_flags(res, carry, alu_all_mask);
+        state_.regs[A] = res;
+        break;
+    }
+    case ADD: {
+        const auto [res, carry] = add8(state_.regs[A], read8(a0));
+        set_flags(res, carry, alu_all_mask);
+        state_.regs[A] = res;
+        break;
+    }
+    case ADC: {
+        const auto [res, carry] = add8(state_.regs[A], read8(a0), state_.regs[PSW] & cf_mask);
+        set_flags(res, carry, alu_all_mask);
+        state_.regs[A] = res;
+        break;
+    }
     case ANA:
-        set_flags(state_.regs[A] &= read8(a0), 0, cf_mask | zf_mask | sf_mask | pf_mask);
+        // TODO: AF
+        set_flags(state_.regs[A] &= read8(a0), 0, alu_all_mask);
         break;
     case ANI:
-        set_flags(state_.regs[A] &= pc_read(), 0, cf_mask | zf_mask | sf_mask | pf_mask);
+        // TODO: AF
+        set_flags(state_.regs[A] &= pc_read(), 0, alu_all_mask);
         break;
     case CALL:
         push(state_.pc + 2);
@@ -730,9 +766,42 @@ void machine::step()
         }
         break;
     }
+    case CMA:
+        // CMA  00101111 ----- A = ~A
+        state_.regs[A] = ~state_.regs[A];
+        break;
+    case CMC:
+        // CMC  00111111 ----C F.C=~F.C
+        state_.regs[PSW] ^= cf_mask;
+        break;
+    case CMP: {
+        const auto [res, carry] = sub8(state_.regs[A], read8(a0));
+        set_flags(res, carry, alu_all_mask);
+        break;
+    }
     case CPI: {
         const auto [ res, carry ] = sub8(state_.regs[A], pc_read());
-        set_flags(res, carry, sf_mask | zf_mask | af_mask | pf_mask | cf_mask);
+        set_flags(res, carry, alu_all_mask);
+        break;
+    }
+    case DAA: {
+        uint8_t lo = state_.regs[A] & 0xf;
+        uint16_t hi = state_.regs[A] & 0xf0;
+        uint8_t f = 0;
+        if (lo > 9 || (state_.regs[PSW] & af_mask))
+            lo += 6;
+        if (lo >= 0x10) {
+            hi += 0x10;
+            f |= af_mask;
+        }
+        if (hi > 0x90 || (state_.regs[PSW] & cf_mask)) {
+            hi += 0x60;
+            if (hi >= 0x100)
+                f |= cf_mask;
+        }
+        state_.regs[A] = (hi & 0xf0) | (lo & 0x0f);
+        set_flags(state_.regs[A], 0, sf_mask | zf_mask | pf_mask);
+        update_flags(f, cf_mask | af_mask);
         break;
     }
     case DAD: {
@@ -750,15 +819,18 @@ void machine::step()
     case DCX:
         write16(a0, read16(a0) - 1);
         break;
+    case DI:
+        state_.inte = false;
+        break;
     case EI:
-        std::cerr << "Ignoring EI\n";
+        state_.inte = true;
         break;
     case HLT:
-        if (state_.pc == DOS_ADDR+1) {
+        if (start_pc == DOS_ADDR) {
             dos_call();
             state_.pc = pop();
             break;
-        } else if (state_.pc == BIOS_ADDR+1) {
+        } else if (start_pc == BIOS_ADDR) {
             throw std::runtime_error { "Warm reset performed" };
         }
         throw std::runtime_error { "Program executed HLT instruction" };
@@ -810,7 +882,10 @@ void machine::step()
     case NOP:
         break;
     case ORA:
-        set_flags(state_.regs[A] |= read8(a0), 0, cf_mask | zf_mask | sf_mask | pf_mask);
+        set_flags(state_.regs[A] |= read8(a0), 0, alu_all_mask);
+        break;
+    case ORI:
+        set_flags(state_.regs[A] |= pc_read(), 0, alu_all_mask);
         break;
     case PCHL:
         state_.pc = read16(REGH);
@@ -821,6 +896,18 @@ void machine::step()
     case PUSH:
         push(read16(a0));
         break;            
+    case RAL: {
+        uint8_t c = !!(state_.regs[PSW] & cf_mask);
+        update_flags(state_.regs[A] & 0x80 ? cf_mask : 0, cf_mask);
+        state_.regs[A] = state_.regs[A] << 1 | c;
+        break;
+    }
+    case RAR: {
+        uint8_t c = !!(state_.regs[PSW] & cf_mask);
+        update_flags(state_.regs[A] & 0x01 ? cf_mask : 0, cf_mask);
+        state_.regs[A] = state_.regs[A] >> 1 | c << 7;
+        break;
+    }
     case RET:
         state_.pc = pop();
         break;
@@ -860,16 +947,52 @@ void machine::step()
     case STC:
         state_.regs[PSW] |= cf_mask;
         break;
+    case SBB: {
+        const auto [res, carry] = sub8(state_.regs[A], read8(a0), state_.regs[PSW] & cf_mask);
+        set_flags(res, carry, alu_all_mask);
+        state_.regs[A] = res;
+        break;
+    }
+    case SBI: {
+        const auto [res, carry] = sub8(state_.regs[A], pc_read(), state_.regs[PSW] & cf_mask);
+        set_flags(res, carry, alu_all_mask);
+        state_.regs[A] = res;
+        break;
+    }
+    case SUB: {
+        const auto [res, carry] = sub8(state_.regs[A], read8(a0));
+        set_flags(res, carry, alu_all_mask);
+        state_.regs[A] = res;
+        break;
+    }
+    case SUI: {
+        const auto [res, carry] = sub8(state_.regs[A], pc_read());
+        set_flags(res, carry, alu_all_mask);
+        state_.regs[A] = res;
+        break;
+    }
     case XCHG:
         // XCHG 11101011 ----- HL <=> DE
         std::swap(state_.regs[D], state_.regs[H]);
         std::swap(state_.regs[E], state_.regs[L]);
         break;
     case XRA:
-        set_flags(state_.regs[A] ^= read8(a0), 0, cf_mask | zf_mask | sf_mask | pf_mask);
+        set_flags(state_.regs[A] ^= read8(a0), 0, alu_all_mask);
+        break;
+    case XRI:
+        set_flags(state_.regs[A] ^= pc_read(), 0, alu_all_mask);
+        break;
+    case XTHL:
+        // XTHL 11100011 ----- H <=> (SP+1), L <=> (SP)
+        std::swap(state_.regs[L], mem_[state_.sp + 0]);
+        std::swap(state_.regs[H], mem_[state_.sp + 1]);
         break;
     default:
-        throw std::runtime_error { "TODO: Handle instruction " + hexstring(inst_num) + "h " + binstring(inst_num) + ": " + instruction_names[inst.type] };
+        std::ostringstream oss;
+        oss << "Unhandled instruction " << hexstring(inst_num) + "h " << binstring(inst_num) + ": " << instruction_names[inst.type] << "\n";
+        disasm_one(oss, mem_, start_pc);
+        oss << state_;
+        throw std::runtime_error { oss.str() };
     }
 
     if (trace_)
@@ -901,8 +1024,10 @@ void machine::dos_call()
 void run_test()
 {
     machine m;
-//    const auto data = read_file("../misc/cputest/8080EXER.COM");
-    const auto data = read_file("../misc/cputest/8080PRE.COM");
+    //const auto data = read_file("../misc/cputest/8080PRE.COM");
+    const auto data = read_file("../misc/cputest/TST8080.COM");
+    //const auto data = read_file("../misc/cputest/8080EXER.COM");
+
     assert(data.size() + 0x100 < (1<<16) - 0x100);
     uint8_t* mem = m.mem();
     auto& state = m.state();
@@ -926,12 +1051,12 @@ void run_test()
     mem[0x38] = 0b01110110; // HLT
     memcpy(&mem[0x100], data.data(), data.size());
     state.pc = 0x100;
-    m.trace(&std::cout);
+    //m.trace(&std::cout);
     for (;;) {
-        if (state.pc == 0x0352) {
-            std::cout << "Error routine called\n";
-            break;
-        }
+        //if (state.pc == 0x06A0) {
+        //    std::cout << "Failed\n";
+        //    break;
+        //}
         m.step();
     }
 }
