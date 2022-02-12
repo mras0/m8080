@@ -48,19 +48,18 @@
 
 constexpr uint8_t sf_bit = 7;
 constexpr uint8_t zf_bit = 6;
-constexpr uint8_t az_bit = 5; // Always zero
 constexpr uint8_t af_bit = 4;
 constexpr uint8_t pf_bit = 2;
-constexpr uint8_t ao_bit = 1; // Always one
 constexpr uint8_t cf_bit = 0;
 
 constexpr uint8_t sf_mask = 1 << sf_bit;
 constexpr uint8_t zf_mask = 1 << zf_bit;
-constexpr uint8_t az_mask = 1 << az_bit;
 constexpr uint8_t af_mask = 1 << af_bit;
 constexpr uint8_t pf_mask = 1 << pf_bit;
-constexpr uint8_t ao_mask = 1 << ao_bit;
 constexpr uint8_t cf_mask = 1 << cf_bit;
+
+constexpr uint8_t az_mask = 1 << 3 | 1 << 5; // Always zero
+constexpr uint8_t ao_mask = 1 << 1; // Always one
 
 // cnd (condition code)
 // 000 = NZ
@@ -455,8 +454,8 @@ uint16_t disasm_one(std::ostream& os, const uint8_t* mem, uint16_t pc)
     }
     os << "\n";
 
-    if (inst.type == UNIMPLEMENTED)
-        throw std::runtime_error { "TODO: Handle instruction " + hexstring(ibytes[0]) + "h " + binstring(ibytes[0]) };
+    //if (inst.type == UNIMPLEMENTED)
+    //    throw std::runtime_error { "TODO: Handle instruction " + hexstring(ibytes[0]) + "h " + binstring(ibytes[0]) };
 
     assert(pc == orig_pc + len);
     return pc;
@@ -469,6 +468,18 @@ struct machine_state {
     bool inte; // interrupts enabled
     uint64_t instruction_count;
 };
+
+bool operator==(const machine_state& l, const machine_state& r)
+{
+    if (memcmp(l.regs, r.regs, sizeof(l.regs)))
+        return false;
+    return l.sp == r.sp && l.pc == r.pc && l.inte == r.inte;
+}
+
+bool operator!=(const machine_state& l, const machine_state& r)
+{
+    return !(l == r);
+}
 
 std::ostream& operator<<(std::ostream& os, const machine_state& state)
 {
@@ -485,10 +496,8 @@ std::ostream& operator<<(std::ostream& os, const machine_state& state)
     const auto psw = state.regs[PSW];
     os << (psw & sf_mask ? 'S' : 's');
     os << (psw & zf_mask ? 'Z' : 'z');
-    os << ((psw >> az_bit) & 1);
     os << (psw & af_mask ? 'A' : 'a');
     os << (psw & pf_mask ? 'P' : 'p');
-    os << ((psw >> ao_bit) & 1);
     os << (psw & cf_mask ? 'C' : 'c');
     os << " INTE=" << static_cast<int>(state.inte);
     os << " #INS: " << state.instruction_count;
@@ -508,8 +517,8 @@ public:
     {
         memset(mem_, 0, sizeof(mem_));
         memset(&state_, 0, sizeof(state_));
-        state_.inte = true;
-        state_.regs[PSW] |= ao_mask;
+        //state_.inte = true;
+        state_.regs[PSW] = ao_mask;
     }
 
     uint8_t* mem()
@@ -764,6 +773,13 @@ void machine::step()
     const auto a0 = inst.args[0];
     const auto a1 = inst.args[1];
 
+    #define DO_ANA(val)                                                   \
+    do {                                                 \
+        const uint8_t t = val;                           \
+        const uint8_t c = (state_.regs[A] | t) & 8;      \
+        set_flags(state_.regs[A] &= t, c, alu_all_mask); \
+    } while (0)
+
     static constexpr uint8_t alu_all_mask = sf_mask | zf_mask | af_mask | pf_mask | cf_mask;
     switch (inst.type) {
     case ACI: {
@@ -791,17 +807,10 @@ void machine::step()
         break;
     }
     case ANA:
-        // TODO: AF
-        //std::cout << state_ << "\n";
-        //disasm_one(std::cout, mem_, start_pc);
-        set_flags(state_.regs[A] &= read8(a0), 0, alu_all_mask);
-        //std::cout << state_ << "\n";
-        //std::cout << "---------\n";
-        //trace(&std::cout);
+        DO_ANA(read8(a0));
         break;
     case ANI:
-        // TODO: AF
-        set_flags(state_.regs[A] &= pc_read(), 0, alu_all_mask);
+        DO_ANA(pc_read());
         break;
     case CALL:
         push(state_.pc + 2);
@@ -852,8 +861,7 @@ void machine::step()
         }
         if (hi > 0x90 || (state_.regs[PSW] & cf_mask)) {
             hi += 0x60;
-            if (hi >= 0x100)
-                f |= cf_mask;
+            f |= cf_mask;
         }
         state_.regs[A] = (hi & 0xf0) | (lo & 0x0f);
         set_flags(state_.regs[A], 0, sf_mask | zf_mask | pf_mask);
@@ -1057,11 +1065,14 @@ void machine::step()
 }
 
 std::string output_buffer;
+bool soft_reset = false;
 
 void output_flush()
 {
     if (output_buffer.empty())
-        return;
+        return;    
+    while (!output_buffer.empty() && output_buffer.back() == '\r')
+        output_buffer.pop_back();
     std::cout << ">>> " << output_buffer << "\n";
     output_buffer.clear();
 }
@@ -1072,9 +1083,11 @@ void output_char(char ch)
         output_flush();
         return;
     }
-    if (ch < 0 || ch > 0x7f) {
-        output_buffer += "\\x" + hexstring(ch, 2);
-        return;
+    if (ch < ' ' || ch > 0x7f) {
+        if (ch != '\t' && ch != '\r') {
+            output_buffer += "\\x" + hexstring(ch, 2);
+            return;
+        }
     }
     output_buffer += ch;
 }
@@ -1104,20 +1117,78 @@ void dos_call(machine& m)
     state.pc = m.pop();
 }
 
-void run_test()
+#include <fstream>
+
+class state_file {
+public:
+    state_file(const char* filename)
+        : in { filename, std::ifstream::binary }
+    {
+        if (!in)
+            throw std::runtime_error { "Error opening " + std::string { filename } };
+    }
+
+    state_file(const state_file&) = delete;
+    state_file& operator=(const state_file&) = delete;
+
+    struct fstate {
+        uint8_t a, b, c, d, e, f, h, l;
+        uint16_t pc, sp;
+        uint8_t iff;
+    } s;
+    static_assert(sizeof(fstate) == 14);
+
+    void next()
+    {
+        if (!in.read((char*)&s, 13)) {
+            ms.pc = 0;
+            return;
+        }
+        ++ms.instruction_count;
+        ms.regs[A] = s.a;
+        ms.regs[B] = s.b;
+        ms.regs[C] = s.c;
+        ms.regs[D] = s.d;
+        ms.regs[E] = s.e;
+        ms.regs[PSW] = s.f;
+        ms.regs[H] = s.h;
+        ms.regs[L] = s.l;
+        ms.pc = s.pc;
+        ms.sp = s.sp;
+        ms.inte = !!s.iff;
+    }
+
+    const machine_state& state() const
+    {
+        return ms;
+    }
+
+private:
+    std::ifstream in;
+    machine_state ms {};
+};
+
+void run_test(const char* filename, state_file* sf)
 {
     constexpr uint16_t DOS_ADDR = 0xE400;
     constexpr uint16_t BIOS_ADDR = 0xF200;
 
+
+    const auto data = read_file(filename);
+
+    soft_reset = false;
     machine m;
 
-    //const auto data = read_file("../misc/cputest/8080PRE.COM");
-    //const auto data = read_file("../misc/cputest/TST8080.COM");
-    //const auto data = read_file("../misc/cputest/CPUTEST.COM");
-    const auto data = read_file("../misc/cputest/8080EXM.COM");
+    std::cout << "--------------------------------------------\n";
+    std::cout << "Testing " << filename << "\n";
+    std::cout << "--------------------------------------------\n";
 
-    m.add_trap(DOS_ADDR, &dos_call);
-    m.add_trap(BIOS_ADDR, [](machine&) { throw std::runtime_error { "Soft reset" }; });
+    m.add_trap(/*DOS_ADDR*/5, &dos_call);
+    m.add_trap(/*BIOS_ADDR*/0, [&](machine&) {
+        output_flush();
+        std::cout << "Soft reset\n";
+        soft_reset = true;
+        });
 
     constexpr uint8_t HLT_INS = 0b01110110;
 
@@ -1130,8 +1201,8 @@ void run_test()
     mem[0x03] = 0; // IO byte
     mem[0x04] = 0; // Disk byte
     mem[0x05] = 0xC3; // JMP
-    mem[0x06] = DOS_ADDR & 0xff;
-    mem[0x07] = DOS_ADDR >> 8;
+    //mem[0x06] = DOS_ADDR & 0xff;
+    //mem[0x07] = DOS_ADDR >> 8;
     // Restart vectors
     mem[0x08] = HLT_INS;
     mem[0x10] = HLT_INS;
@@ -1146,10 +1217,35 @@ void run_test()
     const auto start_time = std::chrono::steady_clock::now();
     //m.trace(&std::cout);
     try {
-        for (;;) {
-            //if (state.instruction_count == 33806185 - 5000)
-            //    m.trace(&std::cout);
+        while (!soft_reset) {
+            //if (state.instruction_count == 2680851926 - 40) m.trace(&std::cout);
             m.step();
+            if (sf) {
+                sf->next();
+                if (sf->state() != state) {
+                    const auto& s = sf->state();
+                    std::cout << "Mismatch!!!\n";
+                    std::cout << "Expected:\n";
+                    std::cout << sf->state() << "\n";
+                    std::cout << "Actual:\n";
+                    std::cout << state << "\n";
+
+                    #define CHECK(f) if (s.f != state.f) std::cout << #f << " mismatch expected " << hex(s.f) << " got " << hex(state.f) << "\n"
+                    CHECK(regs[A]);
+                    CHECK(regs[B]);
+                    CHECK(regs[C]);
+                    CHECK(regs[D]);
+                    CHECK(regs[E]);
+                    CHECK(regs[H]);
+                    CHECK(regs[L]);
+                    CHECK(regs[PSW]);
+                    CHECK(sp);
+                    CHECK(pc);
+                    #undef CHECK
+
+                    throw std::runtime_error { "Failed" };
+                }
+            }
         }
     } catch (...) {
         output_flush();
@@ -1159,11 +1255,30 @@ void run_test()
     }
 }
 
+void disassemble_file(const char* filename)
+{
+    uint8_t mem[65536];
+    const auto data = read_file(filename);
+    assert(data.size() < 65536 - 0x100);
+    memcpy(&mem[0x100], data.data(), data.size());
+    for (uint16_t pc = 0x100; pc < 0x100 + data.size();) {
+        pc = disasm_one(std::cout, mem, pc);
+    }
+}
+
 int main()
 {
     try {
         init_instructions();
-        run_test();
+        //state_file sf0{ "../misc/i8080-core-master/8080PRE.COM.state" };
+        //run_test("../misc/cputest/8080PRE.COM", &sf0);
+        //run_test("../misc/cputest/TST8080.COM");
+        state_file sf { "../misc/i8080-core-master/8080EX1.COM.state" };
+        run_test("../misc/i8080-core-master/8080EX1.COM", &sf);
+        //run_test("../misc/cputest/8080EXM.COM", &sf);
+        //disassemble_file("../misc/cputest/CPUTEST.COM");
+        //state_file sf{ "../misc/i8080-core-master/CPUTEST.COM.state" };
+        //run_test("../misc/cputest/CPUTEST.COM", &sf);
     } catch (const std::exception& e) {
         std::cerr << e.what() << "\n";
         return 1;
