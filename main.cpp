@@ -47,6 +47,7 @@
 
 
 constexpr uint16_t DOS_ADDR = 0xE400;
+constexpr uint16_t BIOS_ADDR = 0xF200;
 
 // Flags: Carry, Aux carry (carry out on bit3), Sign, Zero, Parity
 // SZ0A0P1C
@@ -62,7 +63,6 @@ constexpr uint8_t zf_mask = 1 << zf_bit;
 constexpr uint8_t af_mask = 1 << af_bit;
 constexpr uint8_t pf_mask = 1 << pf_bit;
 constexpr uint8_t cf_mask = 1 << cf_bit;
-constexpr uint8_t all_flags_mask = sf_mask | zf_mask | af_mask | pf_mask | cf_mask;
 
 // cnd (condition code)
 // 000 = NZ
@@ -124,9 +124,18 @@ static_assert(CONDM == 7);
     X(NOP)              \
     X(ORA)              \
     X(ORI)              \
+    X(PCHL)             \
     X(POP)              \
     X(PUSH)             \
     X(RET)              \
+    X(RNZ)              \
+    X(RZ)               \
+    X(RNC)              \
+    X(RC)               \
+    X(RPO)              \
+    X(RPE)              \
+    X(RP)               \
+    X(RM)               \
     X(RAL)              \
     X(RAR)              \
     X(RLC)              \
@@ -169,14 +178,14 @@ enum arg {
     IMM8,
     IMM16,
     MEM, // referenced through HL
-    RB = B | reg_mask,
-    RC = C | reg_mask,
-    RD = D | reg_mask,
-    RE = E | reg_mask,
-    RH = H | reg_mask,
-    RL = L | reg_mask,
+    REGB = B | reg_mask,
+    REGC = C | reg_mask,
+    REGD = D | reg_mask,
+    REGE = E | reg_mask,
+    REGH = H | reg_mask,
+    REGL = L | reg_mask,
     RPSW = PSW | reg_mask,
-    RA = A | reg_mask,
+    REGA = A | reg_mask,
     RSP = SP | reg_mask
 };
 
@@ -214,13 +223,13 @@ instruction instructions[256];
 void init_instructions()
 {
     instructions[0b00000000] /* 00 */ = { NOP, NONE, NONE };
-    instructions[0b00000010] /* 02 */ = { STAX, RB, NONE };
+    instructions[0b00000010] /* 02 */ = { STAX, REGB, NONE };
     instructions[0b00000111] /* 07 */ = { RLC, NONE, NONE };
-    instructions[0b00001010] /* 0A */ = { LDAX, RB, NONE };
+    instructions[0b00001010] /* 0A */ = { LDAX, REGB, NONE };
     instructions[0b00001111] /* 0F */ = { RRC, NONE, NONE };
-    instructions[0b00010010] /* 12 */ = { STAX, RD, NONE };
+    instructions[0b00010010] /* 12 */ = { STAX, REGD, NONE };
     instructions[0b00010111] /* 17 */ = { RAL, NONE, NONE };
-    instructions[0b00011010] /* 1A */ = { LDAX, RD, NONE };
+    instructions[0b00011010] /* 1A */ = { LDAX, REGD, NONE };
     instructions[0b00011111] /* 1F */ = { RAR, NONE, NONE };
     instructions[0b00100010] /* 22 */ = { SHLD, IMM16, NONE };
     instructions[0b00101010] /* 2A */ = { LHLD, IMM16, NONE };
@@ -228,6 +237,7 @@ void init_instructions()
     instructions[0b00110111] /* 37 */ = { STC, IMM16, NONE };
     instructions[0b00111010] /* 3A */ = { LDA, IMM16, NONE };
     instructions[0b01110110] /* 76 */ = { HLT, NONE, NONE };
+    instructions[0b11101001] /* E9 */ = { PCHL, NONE, NONE };
     instructions[0b11101011] /* EB */ = { XCHG, NONE, NONE };
     instructions[0b11111001] /* F9 */ = { SPHL, NONE, NONE };
     instructions[0b11110011] /* F3 */ = { DI, NONE, NONE };
@@ -240,7 +250,7 @@ void init_instructions()
 
     auto reg_pair = [](int val, bool is_pushpop = false) {
         assert(val >= 0 && val <= 3);
-        return val == 3 ? (is_pushpop ? RPSW : RSP) : static_cast<arg>(RB + val * 2);
+        return val == 3 ? (is_pushpop ? RPSW : RSP) : static_cast<arg>(REGB + val * 2);
     };
 
     // INR  00reg100 SZAP- reg+=1
@@ -331,8 +341,13 @@ void init_instructions()
         inst.args[0] = IMM8;
     }
 
-    // Rcc  11cnd000
     instructions[0b11001001] /* C9 */ = { RET, NONE, NONE };
+    // Rcc  11cnd000
+    for (int cc = 0; cc < 8; ++cc) {
+        auto& inst = instructions[0b11000000 | cc << 3];
+        assert(inst.type == UNIMPLEMENTED);
+        inst.type = static_cast<instruction_type>(RNZ + cc);
+    }
 
     // POP  11rp0001 -----
     for (int rp = 0; rp < 4; ++rp) {
@@ -475,11 +490,17 @@ public:
         return state_;
     }
 
+    void trace(std::ostream* os)
+    {
+        trace_ = os;
+    }
+
     void step();
 
 private:
     machine_state state_ {};
     uint8_t mem_[1 << 16];
+    std::ostream* trace_ = nullptr;
 
     uint8_t pc_read()
     {
@@ -513,15 +534,15 @@ private:
     {
         switch (a) {
         case MEM:
-            return mem_[read16(RH)];
-        case RB:
-        case RC:
-        case RD:
-        case RE:
-        case RH:
-        case RL:
-        case RA:
-            return state_.regs[a - RB];
+            return mem_[read16(REGH)];
+        case REGB:
+        case REGC:
+        case REGD:
+        case REGE:
+        case REGH:
+        case REGL:
+        case REGA:
+            return state_.regs[a - REGB];
         }
         std::ostringstream oss;
         oss << "Invalid argument in read8: " << a << "\n";
@@ -531,14 +552,14 @@ private:
     uint16_t read16(arg a) const
     {
         switch (a) {
-        case RB:
+        case REGB:
             return state_.regs[B] << 8 | state_.regs[C];
-        case RD:
+        case REGD:
             return state_.regs[D] << 8 | state_.regs[E];
-        case RH:
+        case REGH:
             return state_.regs[H] << 8 | state_.regs[L];
         case RPSW:
-            return state_.regs[PSW] << 8 | state_.regs[A];
+            return state_.regs[A] << 8 | state_.regs[PSW];
         case RSP:
             return state_.sp;
         }
@@ -551,16 +572,16 @@ private:
     {
         switch (a) {
         case MEM:
-            mem_[read16(RH)] = val;
+            mem_[read16(REGH)] = val;
             return;
-        case RB:
-        case RC:
-        case RD:
-        case RE:
-        case RH:
-        case RL:
-        case RA:
-            state_.regs[a - RB] = val;
+        case REGB:
+        case REGC:
+        case REGD:
+        case REGE:
+        case REGH:
+        case REGL:
+        case REGA:
+            state_.regs[a - REGB] = val;
             return;
         }
         std::ostringstream oss;
@@ -571,21 +592,22 @@ private:
     void write16(arg a, uint16_t val)
     {
         switch (a) {
-        case RB:
+        case REGB:
             state_.regs[B] = static_cast<uint8_t>(val >> 8);
             state_.regs[C] = static_cast<uint8_t>(val);
             return;
-        case RD:
+        case REGD:
             state_.regs[D] = static_cast<uint8_t>(val >> 8);
             state_.regs[E] = static_cast<uint8_t>(val);
             return;
-        case RH:
+        case REGH:
             state_.regs[H] = static_cast<uint8_t>(val >> 8);
             state_.regs[L] = static_cast<uint8_t>(val);
             return;
         case RPSW:
-            state_.regs[PSW] = static_cast<uint8_t>(val >> 8);
-            state_.regs[A]   = static_cast<uint8_t>(val);
+            // TODO: Enforce PSW invariants (unchangable bits)
+            state_.regs[A] = static_cast<uint8_t>(val >> 8);
+            state_.regs[PSW]   = static_cast<uint8_t>(val);
             return;
         case RSP:
             state_.sp = val;
@@ -674,11 +696,8 @@ constexpr std::pair<uint8_t, uint8_t> sub8(uint8_t l, uint8_t r)
 
 void machine::step()
 {
-    if (state_.pc == DOS_ADDR) {
-        dos_call();
-        state_.pc = pop();
-        return;
-    }
+    if (trace_)
+        disasm_one(*trace_, mem_, state_.pc);
 
     const auto inst_num = pc_read();
     const auto& inst = instructions[inst_num];
@@ -713,13 +732,13 @@ void machine::step()
     }
     case CPI: {
         const auto [ res, carry ] = sub8(state_.regs[A], pc_read());
-        set_flags(res, carry, all_flags_mask);
+        set_flags(res, carry, sf_mask | zf_mask | af_mask | pf_mask | cf_mask);
         break;
     }
     case DAD: {
-        const auto res = read16(RH) + read16(a0);
+        const auto res = read16(REGH) + read16(a0);
         update_flags(res & 0x10000 ? cf_mask : 0, cf_mask);
-        write16(RH, res & 0xffff);
+        write16(REGH, res & 0xffff);
         break;
     }
     case DCR: {
@@ -734,8 +753,18 @@ void machine::step()
     case EI:
         std::cerr << "Ignoring EI\n";
         break;
+    case HLT:
+        if (state_.pc == DOS_ADDR+1) {
+            dos_call();
+            state_.pc = pop();
+            break;
+        } else if (state_.pc == BIOS_ADDR+1) {
+            throw std::runtime_error { "Warm reset performed" };
+        }
+        throw std::runtime_error { "Program executed HLT instruction" };
+        break;
     case INR: {
-        const auto [res, carry] = sub8(read8(a0), 1);
+        const auto [res, carry] = add8(read8(a0), 1);
         set_flags(res, carry, sf_mask | zf_mask | af_mask | pf_mask);
         write8(a0, res);
         break;
@@ -760,14 +789,14 @@ void machine::step()
         break;
     }
     case LDA:
-        state_.regs[A] = mem_[read16(RH)];
+        state_.regs[A] = mem_[pc_read16()];
         break;
     case LDAX:
         // LDAX 000x1010 ----- x=0: pair B, x=1 pair D  A <- (Rpair)
         state_.regs[A] = mem_[read16(a0)];
         break;
     case LHLD:
-        write16(RH, read16(pc_read16()));
+        write16(REGH, read16(pc_read16()));
         break;
     case LXI:
         write16(a0, pc_read16());
@@ -783,6 +812,9 @@ void machine::step()
     case ORA:
         set_flags(state_.regs[A] |= read8(a0), 0, cf_mask | zf_mask | sf_mask | pf_mask);
         break;
+    case PCHL:
+        state_.pc = read16(REGH);
+        break;
     case POP:
         write16(a0, pop());
         break;
@@ -791,6 +823,17 @@ void machine::step()
         break;            
     case RET:
         state_.pc = pop();
+        break;
+    case RNZ:
+    case RZ:
+    case RNC:
+    case RC:
+    case RPO:
+    case RPE:
+    case RP:
+    case RM:
+        if (test_cond(static_cast<uint8_t>(inst.type - RNZ)))
+            state_.pc = pop();
         break;
     case RLC:
         update_flags(state_.regs[A] & 0x80 ? cf_mask : 0, cf_mask);
@@ -801,11 +844,11 @@ void machine::step()
         state_.regs[A] = state_.regs[A] >> 1 | state_.regs[A] << 7;
         break;
     case SHLD:
-        write16(pc_read16(), read16(RH));
+        write16(pc_read16(), read16(REGH));
         break;
     case SPHL:
         // SPHL 11111001 ----- SP <- HL
-        state_.sp = read16(RH);
+        state_.sp = read16(REGH);
         break;
     case STA:
         write8(pc_read16(), state_.regs[A]);
@@ -828,6 +871,9 @@ void machine::step()
     default:
         throw std::runtime_error { "TODO: Handle instruction " + hexstring(inst_num) + "h " + binstring(inst_num) + ": " + instruction_names[inst.type] };
     }
+
+    if (trace_)
+        *trace_ << state_ << "\n";
 }
 
 void machine::dos_call()
@@ -835,9 +881,12 @@ void machine::dos_call()
     switch (state_.regs[C]) {
     case 0: // System reset
         throw std::runtime_error { "System reset" };
+    case 2: // Console output
+        std::cout << "Program writes: '" << static_cast<char>(state_.regs[E]) << "' ASCII 0x" << hex(state_.regs[E]) << " " << static_cast<int>(state_.regs[E]) << "\n";
+        return;
     case 9: // Print string
         {
-            uint16_t addr = read16(RD);
+            uint16_t addr = read16(REGD);
             std::string s;
             for (unsigned i = 0; i < 65536 && mem_[addr] != '$'; ++i, ++addr)
                 s.push_back(mem_[addr]);
@@ -852,19 +901,38 @@ void machine::dos_call()
 void run_test()
 {
     machine m;
-    const auto data = read_file("../misc/cputest/8080EXER.COM");
+//    const auto data = read_file("../misc/cputest/8080EXER.COM");
+    const auto data = read_file("../misc/cputest/8080PRE.COM");
     assert(data.size() + 0x100 < (1<<16) - 0x100);
-    m.mem()[0x05] = 0xC3; // JMP
-    m.mem()[0x06] = DOS_ADDR & 0xff;
-    m.mem()[0x07] = DOS_ADDR >> 8;
-    m.mem()[DOS_ADDR] = 0b01110110; // HLT
-    memcpy(&m.mem()[0x100], data.data(), data.size());
+    uint8_t* mem = m.mem();
     auto& state = m.state();
-    m.state().pc = 0x100;
-    for (uint16_t pc = 0x100; pc < 0x100 + data.size();) {
-        //disasm_one(std::cout, m.mem(), state.pc);
+    mem[0x00] = 0xC3; // JMP;
+    mem[0x01] = BIOS_ADDR & 0xff;
+    mem[0x02] = BIOS_ADDR >> 8;
+    mem[0x03] = 0; // IO byte
+    mem[0x04] = 0; // Disk byte
+    mem[0x05] = 0xC3; // JMP
+    mem[0x06] = DOS_ADDR & 0xff;
+    mem[0x07] = DOS_ADDR >> 8;
+    mem[DOS_ADDR] = 0b01110110; // HLT
+    mem[BIOS_ADDR] = 0b01110110; // HLT
+    // Restart vectors
+    mem[0x08] = 0b01110110; // HLT
+    mem[0x10] = 0b01110110; // HLT
+    mem[0x18] = 0b01110110; // HLT
+    mem[0x20] = 0b01110110; // HLT
+    mem[0x28] = 0b01110110; // HLT
+    mem[0x30] = 0b01110110; // HLT
+    mem[0x38] = 0b01110110; // HLT
+    memcpy(&mem[0x100], data.data(), data.size());
+    state.pc = 0x100;
+    m.trace(&std::cout);
+    for (;;) {
+        if (state.pc == 0x0352) {
+            std::cout << "Error routine called\n";
+            break;
+        }
         m.step();
-        //std::cout << m.state() << "\n";
     }
 }
 
@@ -877,4 +945,4 @@ int main()
         std::cerr << e.what() << "\n";
         return 1;
     }
-    }
+}
