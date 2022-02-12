@@ -1168,7 +1168,7 @@ private:
     machine_state ms {};
 };
 
-void run_test(const char* filename, state_file* sf)
+void run_test(const char* filename, state_file* sf = nullptr)
 {
     constexpr uint16_t DOS_ADDR = 0xE400;
     constexpr uint16_t BIOS_ADDR = 0xF200;
@@ -1270,15 +1270,11 @@ int main()
 {
     try {
         init_instructions();
-        //state_file sf0{ "../misc/i8080-core-master/8080PRE.COM.state" };
-        //run_test("../misc/cputest/8080PRE.COM", &sf0);
-        //run_test("../misc/cputest/TST8080.COM");
-        state_file sf { "../misc/i8080-core-master/8080EX1.COM.state" };
-        run_test("../misc/i8080-core-master/8080EX1.COM", &sf);
-        //run_test("../misc/cputest/8080EXM.COM", &sf);
-        //disassemble_file("../misc/cputest/CPUTEST.COM");
-        //state_file sf{ "../misc/i8080-core-master/CPUTEST.COM.state" };
-        //run_test("../misc/cputest/CPUTEST.COM", &sf);
+        run_test("../misc/cputest/8080PRE.COM");
+        run_test("../misc/cputest/TST8080.COM");
+        run_test("../misc/i8080-core-master/8080EX1.COM");
+        run_test("../misc/cputest/8080EXM.COM");
+        run_test("../misc/cputest/CPUTEST.COM");
     } catch (const std::exception& e) {
         std::cerr << e.what() << "\n";
         return 1;
