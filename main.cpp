@@ -1,5 +1,8 @@
 #include <iostream>
 #include <sstream>
+#include <functional>
+#include <map>
+#include <chrono>
 #include <assert.h>
 #include "ioutil.h"
 
@@ -40,22 +43,23 @@
 // 11=RAR
 
 
-constexpr uint16_t DOS_ADDR = 0xE400;
-constexpr uint16_t BIOS_ADDR = 0xF200;
-
 // Flags: Carry, Aux carry (carry out on bit3), Sign, Zero, Parity
 // SZ0A0P1C
 
 constexpr uint8_t sf_bit = 7;
 constexpr uint8_t zf_bit = 6;
+constexpr uint8_t az_bit = 5; // Always zero
 constexpr uint8_t af_bit = 4;
 constexpr uint8_t pf_bit = 2;
+constexpr uint8_t ao_bit = 1; // Always one
 constexpr uint8_t cf_bit = 0;
 
 constexpr uint8_t sf_mask = 1 << sf_bit;
 constexpr uint8_t zf_mask = 1 << zf_bit;
+constexpr uint8_t az_mask = 1 << az_bit;
 constexpr uint8_t af_mask = 1 << af_bit;
 constexpr uint8_t pf_mask = 1 << pf_bit;
+constexpr uint8_t ao_mask = 1 << ao_bit;
 constexpr uint8_t cf_mask = 1 << cf_bit;
 
 // cnd (condition code)
@@ -137,6 +141,7 @@ static_assert(CONDM == 7);
     X(RAR)              \
     X(RLC)              \
     X(RRC)              \
+    X(RST)              \
     X(SUI)              \
     X(SBB)              \
     X(SBI)              \
@@ -176,6 +181,7 @@ enum arg {
     IMM8,
     IMM16,
     MEM, // referenced through HL
+    RST_ARG,
     REGB = B | reg_mask,
     REGC = C | reg_mask,
     REGD = D | reg_mask,
@@ -384,6 +390,14 @@ void init_instructions()
         inst.type = static_cast<instruction_type>(CNZ + cc);
         inst.args[0] = IMM16;
     }
+
+    // RST  11exp111 -----
+    for (int i = 0; i < 8; ++i) {
+        auto& inst = instructions[0b11000111 | i << 3];
+        assert(inst.type == UNIMPLEMENTED);
+        inst.type = RST;
+        inst.args[0] = RST_ARG;
+    }
 }
 
 uint16_t disasm_one(std::ostream& os, const uint8_t* mem, uint16_t pc)
@@ -429,7 +443,13 @@ uint16_t disasm_one(std::ostream& os, const uint8_t* mem, uint16_t pc)
         case IMM16:
             os << hex(immval, 4) << 'H';
             break;
+        case RST_ARG:
+            os << ((ibytes[0] >> 3) & 7);
+            break;
         default:
+            assert(inst.args[i] & reg_mask);
+            [[fallthrough]];
+        case MEM:
             os << inst.args[i];
         }
     }
@@ -465,8 +485,10 @@ std::ostream& operator<<(std::ostream& os, const machine_state& state)
     const auto psw = state.regs[PSW];
     os << (psw & sf_mask ? 'S' : 's');
     os << (psw & zf_mask ? 'Z' : 'z');
+    os << ((psw >> az_bit) & 1);
     os << (psw & af_mask ? 'A' : 'a');
     os << (psw & pf_mask ? 'P' : 'p');
+    os << ((psw >> ao_bit) & 1);
     os << (psw & cf_mask ? 'C' : 'c');
     os << " INTE=" << static_cast<int>(state.inte);
     os << " #INS: " << state.instruction_count;
@@ -475,6 +497,8 @@ std::ostream& operator<<(std::ostream& os, const machine_state& state)
 
 class machine {
 public:
+    using trap_func = std::function<void (machine&)>;
+
     explicit machine()
     {
         reset();
@@ -484,6 +508,8 @@ public:
     {
         memset(mem_, 0, sizeof(mem_));
         memset(&state_, 0, sizeof(state_));
+        state_.inte = true;
+        state_.regs[PSW] |= ao_mask;
     }
 
     uint8_t* mem()
@@ -496,6 +522,16 @@ public:
         return state_;
     }
 
+    uint8_t read8(arg a) const;
+    uint16_t read16(arg a) const;
+    uint16_t read16(uint16_t addr) const;
+    void write8(uint16_t addr, uint8_t val);
+    void write8(arg a, uint8_t val);
+    void write16(uint16_t addr, uint16_t val);
+    void write16(arg a, uint16_t val);
+    void push(uint16_t val);
+    uint16_t pop();
+
     void trace(std::ostream* os)
     {
         trace_ = os;
@@ -503,10 +539,17 @@ public:
 
     void step();
 
+    void add_trap(uint16_t addr, const trap_func& tf)
+    {
+        if (!traps_.insert({addr, tf}).second)
+            throw std::runtime_error {"Trap already installed at 0" + hexstring(addr) + "H" };
+    }
+
 private:
     machine_state state_ {};
     uint8_t mem_[1 << 16];
     std::ostream* trace_ = nullptr;
+    std::map<uint16_t, trap_func> traps_;
 
     uint8_t pc_read()
     {
@@ -517,122 +560,6 @@ private:
     {
         const auto val = read16(state_.pc);
         state_.pc += 2;
-        return val;
-    }
-
-    uint16_t read16(uint16_t addr) const
-    {
-        return mem_[addr] | mem_[(addr + 1) & 0xffff] << 8;
-    }
-
-    void write8(uint16_t addr, uint8_t val)
-    {
-        mem_[addr] = val;
-    }
-
-    void write16(uint16_t addr, uint16_t val)
-    {
-        mem_[addr] = static_cast<uint8_t>(val);
-        mem_[(addr + 1) & 0xffff] = static_cast<uint8_t>(val >> 8);
-    }
-
-    uint8_t read8(arg a) const
-    {
-        switch (a) {
-        case MEM:
-            return mem_[read16(REGH)];
-        case REGB:
-        case REGC:
-        case REGD:
-        case REGE:
-        case REGH:
-        case REGL:
-        case REGA:
-            return state_.regs[a - REGB];
-        }
-        std::ostringstream oss;
-        oss << "Invalid argument in read8: " << a << "\n";
-        throw std::runtime_error { oss.str() };
-    }
-
-    uint16_t read16(arg a) const
-    {
-        switch (a) {
-        case REGB:
-            return state_.regs[B] << 8 | state_.regs[C];
-        case REGD:
-            return state_.regs[D] << 8 | state_.regs[E];
-        case REGH:
-            return state_.regs[H] << 8 | state_.regs[L];
-        case RPSW:
-            return state_.regs[A] << 8 | state_.regs[PSW];
-        case RSP:
-            return state_.sp;
-        }
-        std::ostringstream oss;
-        oss << "Invalid argument in read16: " << a << "\n";
-        throw std::runtime_error { oss.str() };
-    }
-
-    void write8(arg a, uint8_t val)
-    {
-        switch (a) {
-        case MEM:
-            mem_[read16(REGH)] = val;
-            return;
-        case REGB:
-        case REGC:
-        case REGD:
-        case REGE:
-        case REGH:
-        case REGL:
-        case REGA:
-            state_.regs[a - REGB] = val;
-            return;
-        }
-        std::ostringstream oss;
-        oss << "Invalid argument in write8: " << a << "\n";
-        throw std::runtime_error { oss.str() };
-    }
-
-    void write16(arg a, uint16_t val)
-    {
-        switch (a) {
-        case REGB:
-            state_.regs[B] = static_cast<uint8_t>(val >> 8);
-            state_.regs[C] = static_cast<uint8_t>(val);
-            return;
-        case REGD:
-            state_.regs[D] = static_cast<uint8_t>(val >> 8);
-            state_.regs[E] = static_cast<uint8_t>(val);
-            return;
-        case REGH:
-            state_.regs[H] = static_cast<uint8_t>(val >> 8);
-            state_.regs[L] = static_cast<uint8_t>(val);
-            return;
-        case RPSW:
-            // TODO: Enforce PSW invariants (unchangable bits)
-            state_.regs[A] = static_cast<uint8_t>(val >> 8);
-            state_.regs[PSW]   = static_cast<uint8_t>(val);
-            return;
-        case RSP:
-            state_.sp = val;
-            return;
-        }
-        std::ostringstream oss;
-        oss << "Invalid argument in write16: " << a << "\n";
-        throw std::runtime_error { oss.str() };
-    }
-
-    void push(uint16_t val)
-    {
-        write16(state_.sp -= 2, val);
-    }
-
-    uint16_t pop()
-    {
-        const auto val = read16(state_.sp);
-        state_.sp += 2;
         return val;
     }
 
@@ -684,9 +611,122 @@ private:
             flags |= sf_mask;
         update_flags(flags, mask);
     }
-
-    void dos_call();
 };
+
+uint16_t machine::read16(uint16_t addr) const
+{
+    return mem_[addr] | mem_[(addr + 1) & 0xffff] << 8;
+}
+
+void machine::write8(uint16_t addr, uint8_t val)
+{
+    mem_[addr] = val;
+}
+
+void machine::write16(uint16_t addr, uint16_t val)
+{
+    mem_[addr] = static_cast<uint8_t>(val);
+    mem_[(addr + 1) & 0xffff] = static_cast<uint8_t>(val >> 8);
+}
+
+uint8_t machine::read8(arg a) const
+{
+    switch (a) {
+    case MEM:
+        return mem_[read16(REGH)];
+    case REGB:
+    case REGC:
+    case REGD:
+    case REGE:
+    case REGH:
+    case REGL:
+    case REGA:
+        return state_.regs[a - REGB];
+    }
+    std::ostringstream oss;
+    oss << "Invalid argument in read8: " << a << "\n";
+    throw std::runtime_error { oss.str() };
+}
+
+uint16_t machine::read16(arg a) const
+{
+    switch (a) {
+    case REGB:
+        return state_.regs[B] << 8 | state_.regs[C];
+    case REGD:
+        return state_.regs[D] << 8 | state_.regs[E];
+    case REGH:
+        return state_.regs[H] << 8 | state_.regs[L];
+    case RPSW:
+        return state_.regs[A] << 8 | state_.regs[PSW];
+    case RSP:
+        return state_.sp;
+    }
+    std::ostringstream oss;
+    oss << "Invalid argument in read16: " << a << "\n";
+    throw std::runtime_error { oss.str() };
+}
+
+void machine::write8(arg a, uint8_t val)
+{
+    switch (a) {
+    case MEM:
+        mem_[read16(REGH)] = val;
+        return;
+    case REGB:
+    case REGC:
+    case REGD:
+    case REGE:
+    case REGH:
+    case REGL:
+    case REGA:
+        state_.regs[a - REGB] = val;
+        return;
+    }
+    std::ostringstream oss;
+    oss << "Invalid argument in write8: " << a << "\n";
+    throw std::runtime_error { oss.str() };
+}
+
+void machine::write16(arg a, uint16_t val)
+{
+    switch (a) {
+    case REGB:
+        state_.regs[B] = static_cast<uint8_t>(val >> 8);
+        state_.regs[C] = static_cast<uint8_t>(val);
+        return;
+    case REGD:
+        state_.regs[D] = static_cast<uint8_t>(val >> 8);
+        state_.regs[E] = static_cast<uint8_t>(val);
+        return;
+    case REGH:
+        state_.regs[H] = static_cast<uint8_t>(val >> 8);
+        state_.regs[L] = static_cast<uint8_t>(val);
+        return;
+    case RPSW:
+        state_.regs[A] = static_cast<uint8_t>(val >> 8);
+        state_.regs[PSW] = ao_mask | (static_cast<uint8_t>(val) & ~az_mask);
+        return;
+    case RSP:
+        state_.sp = val;
+        return;
+    }
+    std::ostringstream oss;
+    oss << "Invalid argument in write16: " << a << "\n";
+    throw std::runtime_error { oss.str() };
+}
+
+void machine::push(uint16_t val)
+{
+    write16(state_.sp -= 2, val);
+}
+
+uint16_t machine::pop()
+{
+    const auto val = read16(state_.sp);
+    state_.sp += 2;
+    return val;
+}
 
 constexpr std::pair<uint8_t, uint8_t> add8(uint8_t l, uint8_t r, uint8_t carry = 0)
 {
@@ -696,16 +736,27 @@ constexpr std::pair<uint8_t, uint8_t> add8(uint8_t l, uint8_t r, uint8_t carry =
 
 constexpr std::pair<uint8_t, uint8_t> sub8(uint8_t l, uint8_t r, uint8_t carry = 0)
 {
-    const uint8_t res = l - r - !!carry;
-    return { res, static_cast<uint8_t>((~l & r) | (~(l ^ r) & res)) };
+    auto [res, carryout] = add8(l, ~r, !carry);
+    carryout ^= 0x80;
+    //std::cout << hex(l) << "-" << hex(r) << "-" << (int)carry << " -> " << hex(res) << " c=" << hex(carryout) << "\n";
+    return { res, carryout };
+    //const uint8_t res = l - r - !!carry;
+    //return { res, static_cast<uint8_t>((~l & r) | (~(l ^ r) & res)) };
 }
 
 void machine::step()
 {
+    if (auto it = traps_.find(state_.pc); it != traps_.end()) {
+        it->second(*this);
+        return;
+    }
+
     if (trace_)
         disasm_one(*trace_, mem_, state_.pc);
 
     ++state_.instruction_count;
+
+    assert((state_.regs[PSW] & (az_mask | ao_mask)) == ao_mask);
 
     const auto start_pc = state_.pc;
     const auto inst_num = pc_read();
@@ -741,7 +792,12 @@ void machine::step()
     }
     case ANA:
         // TODO: AF
+        //std::cout << state_ << "\n";
+        //disasm_one(std::cout, mem_, start_pc);
         set_flags(state_.regs[A] &= read8(a0), 0, alu_all_mask);
+        //std::cout << state_ << "\n";
+        //std::cout << "---------\n";
+        //trace(&std::cout);
         break;
     case ANI:
         // TODO: AF
@@ -825,16 +881,13 @@ void machine::step()
     case EI:
         state_.inte = true;
         break;
-    case HLT:
-        if (start_pc == DOS_ADDR) {
-            dos_call();
-            state_.pc = pop();
-            break;
-        } else if (start_pc == BIOS_ADDR) {
-            throw std::runtime_error { "Warm reset performed" };
-        }
-        throw std::runtime_error { "Program executed HLT instruction" };
-        break;
+    case HLT: {
+        std::ostringstream oss;
+        oss << "Halt instruction executed\n";
+        disasm_one(oss, mem_, start_pc);
+        oss << state_;
+        throw std::runtime_error { oss.str() };
+    }
     case INR: {
         const auto [res, carry] = add8(read8(a0), 1);
         set_flags(res, carry, sf_mask | zf_mask | af_mask | pf_mask);
@@ -930,6 +983,10 @@ void machine::step()
         update_flags(state_.regs[A] & 0x01 ? cf_mask : 0, cf_mask);
         state_.regs[A] = state_.regs[A] >> 1 | state_.regs[A] << 7;
         break;
+    case RST:
+        push(state_.pc);
+        state_.pc = inst_num & 0b00111000;
+        break;
     case SHLD:
         write16(pc_read16(), read16(REGH));
         break;
@@ -999,34 +1056,70 @@ void machine::step()
         *trace_ << state_ << "\n";
 }
 
-void machine::dos_call()
+std::string output_buffer;
+
+void output_flush()
 {
-    switch (state_.regs[C]) {
+    if (output_buffer.empty())
+        return;
+    std::cout << ">>> " << output_buffer << "\n";
+    output_buffer.clear();
+}
+
+void output_char(char ch)
+{
+    if (ch == '\n') {
+        output_flush();
+        return;
+    }
+    if (ch < 0 || ch > 0x7f) {
+        output_buffer += "\\x" + hexstring(ch, 2);
+        return;
+    }
+    output_buffer += ch;
+}
+
+void dos_call(machine& m)
+{
+    auto& state = m.state();
+    uint8_t* mem = m.mem();
+    switch (state.regs[C]) {
     case 0: // System reset
         throw std::runtime_error { "System reset" };
     case 2: // Console output
-        std::cout << "Program writes: '" << static_cast<char>(state_.regs[E]) << "' ASCII 0x" << hex(state_.regs[E]) << " " << static_cast<int>(state_.regs[E]) << "\n";
-        return;
+        output_char(state.regs[E]);
+        break;
     case 9: // Print string
         {
-            uint16_t addr = read16(REGD);
-            std::string s;
-            for (unsigned i = 0; i < 65536 && mem_[addr] != '$'; ++i, ++addr)
-                s.push_back(mem_[addr]);
-            std::cout << "Program writes: \"" << s << "\"\n";
-            return;
+            uint16_t addr = m.read16(REGD);
+            for (unsigned i = 0; i < 65536 && mem[addr] != '$'; ++i, ++addr)
+                output_char(mem[addr]);
         }
+        break;
+    default:
+        std::cerr << "TODO: DOSCALL " << static_cast<int>(state.regs[C]) << "\n";
+        std::cerr << state << "\n";
+        throw std::runtime_error { "TODO: Handle DOSCALL " + std::to_string(state.regs[C]) };
     }
-    std::cout << "TODO: DOSCALL " << static_cast<int>(state_.regs[C]) << "\n";
-    throw std::runtime_error { "TODO: Handle DOSCALL " + std::to_string(state_.regs[C]) };
+    state.pc = m.pop();
 }
 
 void run_test()
 {
+    constexpr uint16_t DOS_ADDR = 0xE400;
+    constexpr uint16_t BIOS_ADDR = 0xF200;
+
     machine m;
+
     //const auto data = read_file("../misc/cputest/8080PRE.COM");
-    const auto data = read_file("../misc/cputest/TST8080.COM");
-    //const auto data = read_file("../misc/cputest/8080EXER.COM");
+    //const auto data = read_file("../misc/cputest/TST8080.COM");
+    //const auto data = read_file("../misc/cputest/CPUTEST.COM");
+    const auto data = read_file("../misc/cputest/8080EXM.COM");
+
+    m.add_trap(DOS_ADDR, &dos_call);
+    m.add_trap(BIOS_ADDR, [](machine&) { throw std::runtime_error { "Soft reset" }; });
+
+    constexpr uint8_t HLT_INS = 0b01110110;
 
     assert(data.size() + 0x100 < (1<<16) - 0x100);
     uint8_t* mem = m.mem();
@@ -1039,25 +1132,30 @@ void run_test()
     mem[0x05] = 0xC3; // JMP
     mem[0x06] = DOS_ADDR & 0xff;
     mem[0x07] = DOS_ADDR >> 8;
-    mem[DOS_ADDR] = 0b01110110; // HLT
-    mem[BIOS_ADDR] = 0b01110110; // HLT
     // Restart vectors
-    mem[0x08] = 0b01110110; // HLT
-    mem[0x10] = 0b01110110; // HLT
-    mem[0x18] = 0b01110110; // HLT
-    mem[0x20] = 0b01110110; // HLT
-    mem[0x28] = 0b01110110; // HLT
-    mem[0x30] = 0b01110110; // HLT
-    mem[0x38] = 0b01110110; // HLT
+    mem[0x08] = HLT_INS;
+    mem[0x10] = HLT_INS;
+    mem[0x18] = HLT_INS;
+    mem[0x20] = HLT_INS;
+    mem[0x28] = HLT_INS;
+    mem[0x30] = HLT_INS;
+    mem[0x38] = HLT_INS;
     memcpy(&mem[0x100], data.data(), data.size());
+    memset(&mem[DOS_ADDR], HLT_INS, 65536 - DOS_ADDR);
     state.pc = 0x100;
+    const auto start_time = std::chrono::steady_clock::now();
     //m.trace(&std::cout);
-    for (;;) {
-        //if (state.pc == 0x06A0) {
-        //    std::cout << "Failed\n";
-        //    break;
-        //}
-        m.step();
+    try {
+        for (;;) {
+            //if (state.instruction_count == 33806185 - 5000)
+            //    m.trace(&std::cout);
+            m.step();
+        }
+    } catch (...) {
+        output_flush();
+        const auto secs = std::chrono::duration<double> { std::chrono::steady_clock::now() - start_time }.count();
+        std::cout << state.instruction_count << " instructions executed in " << secs << " seconds (" << (state.instruction_count / 1e6) / secs << " MIPS)\n";
+        throw;
     }
 }
 
