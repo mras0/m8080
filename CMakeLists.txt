@@ -29,4 +29,6 @@ add_executable(m8080
     main.cpp
     ioutil.cpp
     ioutil.h
+    m8080.cpp
+    m8080.h
     )
