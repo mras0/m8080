@@ -1,8 +1,10 @@
 #include <iostream>
 #include <signal.h>
+#include <chrono>
 #include "ioutil.h"
 #include "m8080.h"
 #include "cpm.h"
+#include "display.h"
 
 void disassemble_file(const char* filename, uint16_t load_offset)
 {
@@ -48,6 +50,7 @@ public:
         , rom_ { read_file(romfile) }
         , ram_(0x400)
         , video_ram_(7 * 1024)
+        , display_ { height, width, 2, 2 } // Screen is rotated
     {
         assert(rom_.size() == ram_base);
         install_signal_handler();
@@ -140,7 +143,6 @@ public:
     void run()
     {
         install_signal_handler();
-        debug_prompt();
 
         uint8_t rem_pixel_cycle = 0;
         while (!quit_) {
@@ -199,6 +201,7 @@ private:
     uint16_t vpos_ = 0;
     uint16_t hpos_ = 0;
     int interrupt_inst_ = -1;
+    display display_;
 
     // Memory map
     // 0000-1FFF 8K ROM
@@ -220,13 +223,14 @@ private:
     static constexpr uint16_t htotal = 320;
     static constexpr uint16_t vtotal = 262;
     // Visual area
-    static constexpr uint16_t width = 260;
+    static constexpr uint16_t width = 256;
     static constexpr uint16_t height = 224;
     //<display tag="screen" type="raster" rotate="270" width="260" height="224" refresh="59.541985" pixclock="4992000" htotal="320" hbend="0" hbstart="260" vtotal="262" vbend="0" vbstart="224"/>
 
     void debug_prompt();
 
     void update_video(uint8_t pixel_clocks);
+    void update_display();
 };
 
 void invaders::debug_prompt()
@@ -304,12 +308,34 @@ void invaders::update_video(uint8_t pixel_clocks)
         assert(hpos_ < htotal);
         if (++vpos_ == vtotal) {
             vpos_ = 0;
+            update_display();
         }
         // 0xc7 | (64V << 4) | (!64V << 3)
         if (vpos_ == 96)
             interrupt_inst_ = 0xCF;
         else if (vpos_ == 224)
             interrupt_inst_ = 0xD7;
+    }
+}
+
+void invaders::update_display()
+{
+    std::vector<uint32_t> display_data(width * height);
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            display_data[y + (width - x - 1) * height] = video_ram_[x / 8 + y * width / 8] & (1 << (x & 7)) ? 0xffffff : 0x000000;
+        }
+    }
+
+    display_.show(display_data.data());
+    for (auto evt : display_.events()) {
+        if ((evt & ~event_keyup_mask) == event_quit) {
+            quit_ = true;
+            continue;
+        }
+        if (!single_stepping_)
+            std::cout << "TODO: Handle event 0x" << hex(evt) << "\n";
     }
 }
 

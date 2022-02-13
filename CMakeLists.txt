@@ -33,4 +33,6 @@ add_executable(m8080
     m8080.h
     cpm.cpp
     cpm.h
+    display.cpp
+    display.h
     )
