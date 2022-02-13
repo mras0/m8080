@@ -192,6 +192,7 @@ std::ostream& operator<<(std::ostream& os, arg a)
 
 struct instruction {
     instruction_type type;
+    uint8_t base_cycles;
     arg args[2];
 };
 
@@ -199,30 +200,30 @@ instruction instructions[256];
 
 void init_instructions()
 {
-    instructions[0b00000000] /* 00 */ = { NOP, NONE, NONE };
-    instructions[0b00000010] /* 02 */ = { STAX, REGB, NONE };
-    instructions[0b00000111] /* 07 */ = { RLC, NONE, NONE };
-    instructions[0b00001010] /* 0A */ = { LDAX, REGB, NONE };
-    instructions[0b00001111] /* 0F */ = { RRC, NONE, NONE };
-    instructions[0b00010010] /* 12 */ = { STAX, REGD, NONE };
-    instructions[0b00010111] /* 17 */ = { RAL, NONE, NONE };
-    instructions[0b00011010] /* 1A */ = { LDAX, REGD, NONE };
-    instructions[0b00011111] /* 1F */ = { RAR, NONE, NONE };
-    instructions[0b00100010] /* 22 */ = { SHLD, IMM16, NONE };
-    instructions[0b00100111] /* 27 */ = { DAA, NONE, NONE };
-    instructions[0b00101010] /* 2A */ = { LHLD, IMM16, NONE };
-    instructions[0b00101111] /* 2F */ = { CMA, NONE, NONE };
-    instructions[0b00110010] /* 32 */ = { STA, IMM16, NONE }; // STA  00110010 ----- (IMM16) <- A
-    instructions[0b00110111] /* 37 */ = { STC, NONE, NONE };
-    instructions[0b00111010] /* 3A */ = { LDA, IMM16, NONE };
-    instructions[0b00111111] /* 3F */ = { CMC, NONE, NONE };
-    instructions[0b01110110] /* 76 */ = { HLT, NONE, NONE };
-    instructions[0b11100011] /* E3 */ = { XTHL, NONE, NONE };
-    instructions[0b11101001] /* E9 */ = { PCHL, NONE, NONE };
-    instructions[0b11101011] /* EB */ = { XCHG, NONE, NONE };
-    instructions[0b11111001] /* F9 */ = { SPHL, NONE, NONE };
-    instructions[0b11110011] /* F3 */ = { DI, NONE, NONE };
-    instructions[0b11111011] /* FB */ = { EI, NONE, NONE };
+    instructions[0b00000000] /* 00 */ = { NOP, 4, NONE, NONE };
+    instructions[0b00000010] /* 02 */ = { STAX, 7, REGB, NONE };
+    instructions[0b00000111] /* 07 */ = { RLC, 4, NONE, NONE };
+    instructions[0b00001010] /* 0A */ = { LDAX, 7, REGB, NONE };
+    instructions[0b00001111] /* 0F */ = { RRC, 4, NONE, NONE };
+    instructions[0b00010010] /* 12 */ = { STAX, 7, REGD, NONE };
+    instructions[0b00010111] /* 17 */ = { RAL, 4, NONE, NONE };
+    instructions[0b00011010] /* 1A */ = { LDAX, 7, REGD, NONE };
+    instructions[0b00011111] /* 1F */ = { RAR, 4, NONE, NONE };
+    instructions[0b00100010] /* 22 */ = { SHLD, 16, IMM16, NONE };
+    instructions[0b00100111] /* 27 */ = { DAA, 4, NONE, NONE };
+    instructions[0b00101010] /* 2A */ = { LHLD, 16, IMM16, NONE };
+    instructions[0b00101111] /* 2F */ = { CMA, 4, NONE, NONE };
+    instructions[0b00110010] /* 32 */ = { STA, 13, IMM16, NONE }; // STA  00110010 ----- (IMM16) <- A
+    instructions[0b00110111] /* 37 */ = { STC, 4, NONE, NONE };
+    instructions[0b00111010] /* 3A */ = { LDA, 13, IMM16, NONE };
+    instructions[0b00111111] /* 3F */ = { CMC, 4, NONE, NONE };
+    instructions[0b01110110] /* 76 */ = { HLT, 7, NONE, NONE };
+    instructions[0b11100011] /* E3 */ = { XTHL, 18, NONE, NONE };
+    instructions[0b11101001] /* E9 */ = { PCHL, 5, NONE, NONE };
+    instructions[0b11101011] /* EB */ = { XCHG, 4, NONE, NONE };
+    instructions[0b11111001] /* F9 */ = { SPHL, 5, NONE, NONE };
+    instructions[0b11110011] /* F3 */ = { DI, 4, NONE, NONE };
+    instructions[0b11111011] /* FB */ = { EI, 4, NONE, NONE };
 
     auto reg_or_mem = [](int val) {
         assert(val >= 0 && val <= 7);
@@ -240,6 +241,7 @@ void init_instructions()
         assert(inst.type == UNIMPLEMENTED);
         inst.type = INR;
         inst.args[0] = reg_or_mem(r);
+        inst.base_cycles = inst.args[0] == MEM ? 10 : 5;
     }
     // DCR  00reg101 SZAP- reg-=1
     for (int r = 0; r < 8; ++r) {
@@ -247,6 +249,7 @@ void init_instructions()
         assert(inst.type == UNIMPLEMENTED);
         inst.type = DCR;
         inst.args[0] = reg_or_mem(r);
+        inst.base_cycles = inst.args[0] == MEM ? 10 : 5;
     }
     // LXI  00rp0001 ----- Load register pair with 16 bit immediate data
     for (int rp = 0; rp < 4; ++rp) {
@@ -255,6 +258,7 @@ void init_instructions()
         inst.type = LXI;
         inst.args[0] = reg_pair(rp);
         inst.args[1] = IMM16;
+        inst.base_cycles = 10;
     }
     // INX  00rp0011 ----- rp++
     for (int rp = 0; rp < 4; ++rp) {
@@ -263,6 +267,7 @@ void init_instructions()
         inst.type = INX;
         inst.args[0] = reg_pair(rp);
         inst.args[1] = NONE;
+        inst.base_cycles = 5;
     }
     // DAD  00rp1001 ----C HL += rp
     for (int rp = 0; rp < 4; ++rp) {
@@ -271,6 +276,7 @@ void init_instructions()
         inst.type = DAD;
         inst.args[0] = reg_pair(rp);
         inst.args[1] = NONE;
+        inst.base_cycles = 10;
     }
     // DCX  00rp1011 ----- rp--
     for (int rp = 0; rp < 4; ++rp) {
@@ -279,6 +285,7 @@ void init_instructions()
         inst.type = DCX;
         inst.args[0] = reg_pair(rp);
         inst.args[1] = NONE;
+        inst.base_cycles = 5;
     }
     // MVI  00reg110 ----- Load register/memory with 8 bit immediate data
     for (int reg = 0; reg < 8; ++reg) {
@@ -287,6 +294,7 @@ void init_instructions()
         inst.type = MVI;
         inst.args[0] = reg_or_mem(reg);
         inst.args[1] = IMM8;
+        inst.base_cycles = inst.args[0] == MEM ? 10 : 5;
     }
     // MOV  01dstsrc ----- dst = src (110 for dst + src is illegal)
     for (int dst = 0; dst < 8; ++dst) {
@@ -298,6 +306,7 @@ void init_instructions()
             inst.type = MOV;
             inst.args[0] = reg_or_mem(dst);
             inst.args[1] = reg_or_mem(src);
+            inst.base_cycles = inst.args[0] == MEM || inst.args[1] == MEM ? 10 : 7;
         }
     }
     for (int ope = 0; ope < 8; ++ope) {
@@ -310,6 +319,7 @@ void init_instructions()
             assert(inst.type == UNIMPLEMENTED);
             inst.type = optype[ope];
             inst.args[0] = reg_or_mem(reg);
+            inst.base_cycles = inst.args[0] == MEM ? 7 : 4;
         }
         // opI  11ope110 SZAPC ope = operation, A = A op 8 bit immediate
 
@@ -320,14 +330,16 @@ void init_instructions()
         assert(inst.type == UNIMPLEMENTED);
         inst.type = immop[ope];
         inst.args[0] = IMM8;
+        inst.base_cycles = 7;
     }
 
-    instructions[0b11001001] /* C9 */ = { RET, NONE, NONE };
+    instructions[0b11001001] /* C9 */ = { RET, 10, NONE, NONE };
     // Rcc  11cnd000
     for (int cc = 0; cc < 8; ++cc) {
         auto& inst = instructions[0b11000000 | cc << 3];
         assert(inst.type == UNIMPLEMENTED);
         inst.type = static_cast<instruction_type>(RNZ + cc);
+        inst.base_cycles = 5; // 11 if returning
     }
 
     // POP  11rp0001 -----
@@ -336,15 +348,17 @@ void init_instructions()
         assert(inst.type == UNIMPLEMENTED);
         inst.type = POP;
         inst.args[0] = reg_pair(rp, true);
+        inst.base_cycles = 10;
     }
 
-    instructions[0b11000011] /* C3 */ = { JMP, IMM16, NONE };
+    instructions[0b11000011] /* C3 */ = { JMP, 10, IMM16, NONE };
     // Jcc  11cnd01x -----
     for (int cc = 0; cc < 8; ++cc) {
         auto& inst = instructions[0b11000010 | cc << 3];
         assert(inst.type == UNIMPLEMENTED);
         inst.type = static_cast<instruction_type>(JNZ + cc);
         inst.args[0] = IMM16;
+        inst.base_cycles = 10;
     }
 
     // PUSH 11rp0101 -----
@@ -353,15 +367,17 @@ void init_instructions()
         assert(inst.type == UNIMPLEMENTED);
         inst.type = PUSH;
         inst.args[0] = reg_pair(rp, true);
+        inst.base_cycles = 11;
     }
 
-    instructions[0b11001101] /* CD */ = { CALL, IMM16, NONE };
+    instructions[0b11001101] /* CD */ = { CALL, 17, IMM16, NONE };
     // Ccc  11cnd10x -----
     for (int cc = 0; cc < 8; ++cc) {
         auto& inst = instructions[0b11000100 | cc << 3];
         assert(inst.type == UNIMPLEMENTED);
         inst.type = static_cast<instruction_type>(CNZ + cc);
         inst.args[0] = IMM16;
+        inst.base_cycles = 11; // 17 if calling
     }
 
     // RST  11exp111 -----
@@ -370,6 +386,7 @@ void init_instructions()
         assert(inst.type == UNIMPLEMENTED);
         inst.type = RST;
         inst.args[0] = RST_ARG;
+        inst.base_cycles = 11;
     }
 }
 
@@ -457,16 +474,16 @@ bool operator!=(const m8080_state& l, const m8080_state& r)
 
 std::ostream& operator<<(std::ostream& os, const m8080_state& state)
 {
-    os << "A = " << hex(state.regs[A]);
-    os << " B = " << hex(state.regs[B]);
-    os << " C = " << hex(state.regs[C]);
-    os << " D = " << hex(state.regs[D]);
-    os << " E = " << hex(state.regs[E]);
-    os << " H = " << hex(state.regs[H]);
-    os << " L = " << hex(state.regs[L]);
-    os << " SP = " << hex(state.sp);
-    os << " PC = " << hex(state.pc);
-    os << " PSW = " << hex(state.regs[PSW]) << " ";
+    os << "A=" << hex(state.regs[A]);
+    os << " B=" << hex(state.regs[B]);
+    os << " C=" << hex(state.regs[C]);
+    os << " D=" << hex(state.regs[D]);
+    os << " E=" << hex(state.regs[E]);
+    os << " H=" << hex(state.regs[H]);
+    os << " L=" << hex(state.regs[L]);
+    os << " SP=" << hex(state.sp);
+    os << " PC=" << hex(state.pc);
+    os << " PSW=" << hex(state.regs[PSW]) << " ";
     const auto psw = state.regs[PSW];
     os << (psw & sf_mask ? 'S' : 's');
     os << (psw & zf_mask ? 'Z' : 'z');
@@ -474,7 +491,8 @@ std::ostream& operator<<(std::ostream& os, const m8080_state& state)
     os << (psw & pf_mask ? 'P' : 'p');
     os << (psw & cf_mask ? 'C' : 'c');
     os << " INTE=" << static_cast<int>(state.inte);
-    os << " #INS: " << state.instruction_count;
+    os << " #I: " << state.instruction_count;
+    os << " #C: " << state.cycle_count;
     return os;
 }
 
@@ -483,15 +501,6 @@ public:
     explicit impl(m8080_bus& bus)
         : bus_ { bus }
     {
-        reset();
-    }
-
-    void reset()
-    {
-        memset(state_.regs, 0, sizeof(state_.regs));
-        state_.sp = 0;
-        state_.pc = 0;
-        state_.inte = false;
         state_.regs[PSW] = ao_mask;
     }
 
@@ -738,8 +747,6 @@ void m8080::impl::step()
     if (trace_)
         disasm_one(*trace_, bus_, state_.pc);
 
-    ++state_.instruction_count;
-
     assert((state_.regs[PSW] & (az_mask | ao_mask)) == ao_mask);
 
     const auto start_pc = state_.pc;
@@ -747,6 +754,12 @@ void m8080::impl::step()
     const auto& inst = instructions[inst_num];
     const auto a0 = inst.args[0];
     const auto a1 = inst.args[1];
+
+    assert(inst.base_cycles);
+
+    ++state_.instruction_count;
+    state_.cycle_count += inst.base_cycles;
+
 
 #define DO_ANA(val)                                      \
     do {                                                 \
@@ -803,6 +816,7 @@ void m8080::impl::step()
         if (test_cond(static_cast<uint8_t>(inst.type - CNZ))) {
             push(state_.pc);
             state_.pc = target;
+            state_.cycle_count += 6;
         }
         break;
     }
@@ -955,8 +969,10 @@ void m8080::impl::step()
     case RPE:
     case RP:
     case RM:
-        if (test_cond(static_cast<uint8_t>(inst.type - RNZ)))
+        if (test_cond(static_cast<uint8_t>(inst.type - RNZ))) {
             state_.pc = pop();
+            state_.cycle_count += 6;
+        }
         break;
     case RLC:
         update_flags(state_.regs[A] & 0x80 ? cf_mask : 0, cf_mask);

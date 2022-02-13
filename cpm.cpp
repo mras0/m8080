@@ -110,6 +110,7 @@ void run_cpm_test(const char* filename)
         output_flush();
         const auto secs = std::chrono::duration<double> { std::chrono::steady_clock::now() - start_time }.count();
         std::cout << state.instruction_count << " instructions executed in " << secs << " seconds (" << (state.instruction_count / 1e6) / secs << " MIPS)\n";
+        std::cout << state.cycle_count << " clock cycles (" << state.cycle_count / 2e6 << " seconds at 2MHz) " << (state.cycle_count / 2e6)*100/secs << "% compared to real time.\n";
     };
     //m.trace(&std::cout);
     try {

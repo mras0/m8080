@@ -13,6 +13,7 @@ struct m8080_state {
     uint16_t pc;
     bool inte; // interrupts enabled
     uint64_t instruction_count;
+    uint64_t cycle_count;
 
     // Note: Must match regnnum
 
