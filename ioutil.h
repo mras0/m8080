@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <string>
 #include <vector>
+#include <optional>
 
 class num_formatter {
 public:
@@ -47,5 +48,7 @@ std::string binstring(T n, int w = static_cast<int>(sizeof(T) * 8))
 
 std::vector<uint8_t> read_file(const std::string& path);
 void hexdump(std::ostream& os, const uint8_t* data, size_t size, uint16_t address = 0);
+
+std::optional<uint16_t> read_number(const char* s);
 
 #endif

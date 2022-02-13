@@ -70,6 +70,7 @@ static_assert(CONDM == 7);
     X(DI)               \
     X(EI)               \
     X(HLT)              \
+    X(IN)               \
     X(INR)              \
     X(INX)              \
     X(JMP)              \
@@ -90,6 +91,7 @@ static_assert(CONDM == 7);
     X(NOP)              \
     X(ORA)              \
     X(ORI)              \
+    X(OUT)              \
     X(PCHL)             \
     X(POP)              \
     X(PUSH)             \
@@ -218,6 +220,8 @@ void init_instructions()
     instructions[0b00111010] /* 3A */ = { LDA, 13, IMM16, NONE };
     instructions[0b00111111] /* 3F */ = { CMC, 4, NONE, NONE };
     instructions[0b01110110] /* 76 */ = { HLT, 7, NONE, NONE };
+    instructions[0b11010011] /* D3 */ = { OUT, 10, IMM8, NONE };
+    instructions[0b11011011] /* DB */ = { IN, 10, IMM8, NONE };
     instructions[0b11100011] /* E3 */ = { XTHL, 18, NONE, NONE };
     instructions[0b11101001] /* E9 */ = { PCHL, 5, NONE, NONE };
     instructions[0b11101011] /* EB */ = { XCHG, 4, NONE, NONE };
@@ -525,7 +529,7 @@ public:
         trace_ = os;
     }
 
-    void step();
+    uint8_t step();
 
     void add_trap(uint16_t addr, const trap_func& tf)
     {
@@ -738,8 +742,10 @@ constexpr std::pair<uint8_t, uint8_t> sub8(uint8_t l, uint8_t r, uint8_t carry =
     //return { res, static_cast<uint8_t>((~l & r) | (~(l ^ r) & res)) };
 }
 
-void m8080::impl::step()
+uint8_t m8080::impl::step()
 {
+    const auto cycles_before = state_.cycle_count;
+
     if (auto it = traps_.find(state_.pc); it != traps_.end()) {
         it->second();
     }
@@ -750,7 +756,18 @@ void m8080::impl::step()
     assert((state_.regs[PSW] & (az_mask | ao_mask)) == ao_mask);
 
     const auto start_pc = state_.pc;
-    const auto inst_num = pc_read();
+    uint8_t inst_num;
+    if (int interrupt_instr; state_.inte && (interrupt_instr = bus_.interrupt()) >= 0) {
+        assert((interrupt_instr & ~0x38) == 0b11000111);
+        if (trace_)
+            *trace_ << "Interrupt 0" << hex(interrupt_instr, 2) << "H (RST " << hex((interrupt_instr >> 3) & 7, 1) << ")\n";
+        state_.inte = false;
+        bus_.inte(false);
+        inst_num = static_cast<uint8_t>(interrupt_instr);
+    } else {
+        inst_num = pc_read();
+    }
+
     const auto& inst = instructions[inst_num];
     const auto a0 = inst.args[0];
     const auto a1 = inst.args[1];
@@ -874,9 +891,11 @@ void m8080::impl::step()
         break;
     case DI:
         state_.inte = false;
+        bus_.inte(false);
         break;
     case EI:
         state_.inte = true;
+        bus_.inte(true);
         break;
     case HLT: {
         std::ostringstream oss;
@@ -885,6 +904,9 @@ void m8080::impl::step()
         oss << state_;
         throw std::runtime_error { oss.str() };
     }
+    case IN:
+        state_.regs[A] = bus_.input(pc_read());
+        break;
     case INR: {
         const auto [res, carry] = add8(read8(a0), 1);
         set_flags(res, carry, sf_mask | zf_mask | af_mask | pf_mask);
@@ -936,6 +958,9 @@ void m8080::impl::step()
         break;
     case ORI:
         set_flags(state_.regs[A] |= pc_read(), 0, alu_all_mask);
+        break;
+    case OUT:
+        bus_.output(pc_read(), state_.regs[A]);
         break;
     case PCHL:
         state_.pc = read16(REGH);
@@ -1058,6 +1083,9 @@ void m8080::impl::step()
 
     if (trace_)
         *trace_ << state_ << "\n";
+
+    assert(state_.cycle_count - cycles_before < 256);
+    return static_cast<uint8_t>(state_.cycle_count - cycles_before);
 }
 
 m8080::m8080(m8080_bus& bus)
@@ -1072,9 +1100,9 @@ m8080_state& m8080::state()
     return impl_->state();
 }
 
-void m8080::step()
+uint8_t m8080::step()
 {
-    impl_->step();
+    return impl_->step();
 }
 
 void m8080::add_trap(uint16_t addr, const trap_func& tf)
@@ -1103,4 +1131,22 @@ void m8080::write_mem(uint16_t addr, const void* src, uint16_t len)
 void m8080::trace(std::ostream* os)
 {
     impl_->trace(os);
+}
+
+uint8_t instruction_length(uint8_t instruction)
+{
+    const auto& ins = instructions[instruction];
+    assert(ins.type != UNIMPLEMENTED);
+    uint8_t l = 1;
+    for (int i = 0; i < 2; ++i) {
+        switch (ins.args[i]) {
+        case IMM8:
+            l += 1;
+            break;
+        case IMM16:
+            l += 2;
+            break;       
+        }
+    }
+    return l;
 }

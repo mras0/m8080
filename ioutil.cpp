@@ -66,3 +66,34 @@ void hexdump(std::ostream& os, const uint8_t* data, size_t size, uint16_t addres
         i += here;
     }
 }
+
+uint8_t get_digit(char ch)
+{
+    if (ch >= '0' && ch <= '9')
+        return ch - '0';
+    else if (ch >= 'a' && ch <= 'f')
+        return 10 + ch - 'a';
+    else if (ch >= 'A' && ch <= 'F')
+        return 10 + ch - 'A';
+    else
+        return 0xff;
+}
+
+std::optional<uint16_t> read_number(const char* s)
+{
+    if (!*s)
+        return {};
+
+    uint8_t base = 16;
+    uint16_t num = 0;
+    while (*s) {
+        const uint8_t digit = get_digit(*s);
+        if (digit > base)
+            return {};
+        if (num * base + digit >= 65536)
+            return {};
+        num = num * base + digit;
+        ++s;
+    }
+    return { num };
+}

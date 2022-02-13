@@ -57,8 +57,16 @@ std::ostream& operator<<(std::ostream& os, const m8080_state& state);
 
 class m8080_bus {
 public:
+    // Memory interface
     virtual uint8_t peek8(uint16_t addr) = 0;
     virtual void poke8(uint16_t addr, uint8_t val) = 0;
+
+    // I/O interface
+    virtual uint8_t input(uint8_t port) = 0;
+    virtual void output(uint8_t port, uint8_t value) = 0;
+
+    virtual int interrupt() = 0;
+    virtual void inte(bool) = 0;
 };
 
 class m8080_mem_bus final : public m8080_bus {
@@ -69,13 +77,13 @@ public:
         assert(mem_size <= 65536);
     }
 
-    uint8_t peek8(uint16_t addr)
+    uint8_t peek8(uint16_t addr) override
     {
         assert(addr < mem_.size());
         return addr < mem_.size() ? mem_[addr] : 0xFF;
     }
 
-    void poke8(uint16_t addr, uint8_t val)
+    void poke8(uint16_t addr, uint8_t val) override
     {
         assert(addr < mem_.size());
         if (addr < mem_.size())
@@ -85,6 +93,26 @@ public:
     std::vector<uint8_t>& mem()
     {
         return mem_;
+    }
+
+    uint8_t input(uint8_t) override
+    {
+        assert(0);
+        return 0xFF;
+    }
+
+    void output(uint8_t, uint8_t) override
+    {
+        assert(0);
+    }
+
+    int interrupt() override
+    {
+        return -1;
+    }
+
+    void inte(bool) override
+    {
     }
 
 private:
@@ -98,7 +126,7 @@ public:
 
     m8080_state& state();
 
-    void step();
+    uint8_t step();
 
     using trap_func = std::function<void(void)>;
     void add_trap(uint16_t addr, const trap_func& tf);
@@ -115,5 +143,7 @@ private:
 };
 
 uint16_t disasm_one(std::ostream& os, m8080_bus& bus, uint16_t pc);
+
+uint8_t instruction_length(uint8_t instruction);
 
 #endif
