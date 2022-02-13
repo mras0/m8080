@@ -31,4 +31,6 @@ add_executable(m8080
     ioutil.h
     m8080.cpp
     m8080.h
+    cpm.cpp
+    cpm.h
     )
