@@ -67,7 +67,9 @@ void run_cpm_test(const char* filename)
     const auto data = read_file(filename);
 
     soft_reset = false;
-    m8080 m;
+
+    m8080_mem_bus mem { 65536 };
+    m8080 m { mem };
     auto& state = m.state();
 
     std::cout << "--------------------------------------------\n";
@@ -103,9 +105,10 @@ void run_cpm_test(const char* filename)
     m.poke8(0x0030, HLT_INS);
     m.poke8(0x0038, HLT_INS);
     m.write_mem(0x0100, data.data(), static_cast<uint16_t>(data.size()));
-
-    m.poke8(DOS_ADDR, RET_INS);
+    memset(&mem.mem()[DOS_ADDR], HLT_INS, 65536 - DOS_ADDR);
     state.pc = 0x100;
+    m.poke8(DOS_ADDR, RET_INS);
+    m.poke8(BIOS_ADDR, RET_INS);
 
     const auto start_time = std::chrono::steady_clock::now();
     //m.trace(&std::cout);
@@ -121,23 +124,21 @@ void run_cpm_test(const char* filename)
     }
 }
 
-#if 0
-
 void disassemble_file(const char* filename)
 {
-    uint8_t mem[65536];
+    m8080_mem_bus mem_bus { 65536 };
     const auto data = read_file(filename);
     assert(data.size() < 65536 - 0x100);
-    memcpy(&mem[0x100], data.data(), data.size());
+    memcpy(&mem_bus.mem()[0x100], data.data(), data.size());
     for (uint16_t pc = 0x100; pc < 0x100 + data.size();) {
-        pc = disasm_one(std::cout, mem, pc);
+        pc = disasm_one(std::cout, mem_bus, pc);
     }
 }
-#endif
 
 int main()
 {
     try {
+        disassemble_file("../misc/cputest/8080PRE.COM");
         run_cpm_test("../misc/cputest/8080PRE.COM");
         run_cpm_test("../misc/cputest/TST8080.COM");
         run_cpm_test("../misc/cputest/8080EXM.COM");

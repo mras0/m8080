@@ -381,11 +381,11 @@ struct m8080_static_init {
     }
 } msi;
 
-uint16_t disasm_one(std::ostream& os, const uint8_t* mem, uint16_t pc)
+uint16_t disasm_one(std::ostream& os, m8080_bus& bus, uint16_t pc)
 {
     const auto orig_pc = pc;
     auto get = [&]() {
-        return mem[(pc++) & 0xffff];
+        return bus.peek8((pc++) & 0xffff);
     };
 
     uint8_t ibytes[3];
@@ -480,22 +480,19 @@ std::ostream& operator<<(std::ostream& os, const m8080_state& state)
 
 class m8080::impl {
 public:
-    explicit impl()
+    explicit impl(m8080_bus& bus)
+        : bus_ { bus }
     {
         reset();
     }
 
     void reset()
     {
-        memset(mem_, 0, sizeof(mem_));
-        memset(&state_, 0, sizeof(state_));
-        //state_.inte = true;
+        memset(state_.regs, 0, sizeof(state_.regs));
+        state_.sp = 0;
+        state_.pc = 0;
+        state_.inte = false;
         state_.regs[PSW] = ao_mask;
-    }
-
-    uint8_t* mem()
-    {
-        return mem_;
     }
 
     m8080_state& state()
@@ -528,14 +525,14 @@ public:
     }
 
 private:
+    m8080_bus& bus_;
     m8080_state state_ {};
-    uint8_t mem_[1 << 16];
     std::ostream* trace_ = nullptr;
     std::map<uint16_t, trap_func> traps_;
 
     uint8_t pc_read()
     {
-        return mem_[state_.pc++];
+        return read8(state_.pc++);
     }
 
     uint16_t pc_read16()
@@ -597,30 +594,31 @@ private:
 
 uint16_t m8080::impl::read16(uint16_t addr) const
 {
-    return mem_[addr] | mem_[(addr + 1) & 0xffff] << 8;
+    const auto lo = read8(addr);
+    return lo | read8((addr + 1) & 0xffff) << 8;
 }
 
 void m8080::impl::write8(uint16_t addr, uint8_t val)
 {
-    mem_[addr] = val;
+    bus_.poke8(addr, val);
 }
 
 void m8080::impl::write16(uint16_t addr, uint16_t val)
 {
-    mem_[addr] = static_cast<uint8_t>(val);
-    mem_[(addr + 1) & 0xffff] = static_cast<uint8_t>(val >> 8);
+    write8(addr, static_cast<uint8_t>(val));
+    write8((addr + 1) & 0xffff, static_cast<uint8_t>(val >> 8));
 }
 
 uint8_t m8080::impl::read8(uint16_t addr) const
 {
-    return mem_[addr];
+    return bus_.peek8(addr);
 }
 
 uint8_t m8080::impl::read8(arg a) const
 {
     switch (a) {
     case MEM:
-        return mem_[read16(REGH)];
+        return read8(read16(REGH));
     case REGB:
     case REGC:
     case REGD:
@@ -658,7 +656,7 @@ void m8080::impl::write8(arg a, uint8_t val)
 {
     switch (a) {
     case MEM:
-        mem_[read16(REGH)] = val;
+        write8(read16(REGH), val);
         return;
     case REGB:
     case REGC:
@@ -738,7 +736,7 @@ void m8080::impl::step()
     }
 
     if (trace_)
-        disasm_one(*trace_, mem_, state_.pc);
+        disasm_one(*trace_, bus_, state_.pc);
 
     ++state_.instruction_count;
 
@@ -869,7 +867,7 @@ void m8080::impl::step()
     case HLT: {
         std::ostringstream oss;
         oss << "Halt instruction executed\n";
-        disasm_one(oss, mem_, start_pc);
+        disasm_one(oss, bus_, start_pc);
         oss << state_;
         throw std::runtime_error { oss.str() };
     }
@@ -899,11 +897,11 @@ void m8080::impl::step()
         break;
     }
     case LDA:
-        state_.regs[A] = mem_[pc_read16()];
+        state_.regs[A] = read8(pc_read16());
         break;
     case LDAX:
         // LDAX 000x1010 ----- x=0: pair B, x=1 pair D  A <- (Rpair)
-        state_.regs[A] = mem_[read16(a0)];
+        state_.regs[A] = read8(read16(a0));
         break;
     case LHLD:
         write16(REGH, read16(pc_read16()));
@@ -1024,15 +1022,20 @@ void m8080::impl::step()
     case XRI:
         set_flags(state_.regs[A] ^= pc_read(), 0, alu_all_mask);
         break;
-    case XTHL:
+    case XTHL: {
         // XTHL 11100011 ----- H <=> (SP+1), L <=> (SP)
-        std::swap(state_.regs[L], mem_[state_.sp + 0]);
-        std::swap(state_.regs[H], mem_[state_.sp + 1]);
+        const auto new_h = read8(state_.sp + 1);
+        const auto new_l = read8(state_.sp);
+        write8(state_.sp + 1, state_.regs[H]);
+        write8(state_.sp, state_.regs[L]);
+        state_.regs[H] = new_h;
+        state_.regs[L] = new_l;
         break;
+    }
     default:
         std::ostringstream oss;
         oss << "Unhandled instruction " << hexstring(inst_num) + "h " << binstring(inst_num) + ": " << instruction_names[inst.type] << "\n";
-        disasm_one(oss, mem_, start_pc);
+        disasm_one(oss, bus_, start_pc);
         oss << state_;
         throw std::runtime_error { oss.str() };
     }
@@ -1041,8 +1044,8 @@ void m8080::impl::step()
         *trace_ << state_ << "\n";
 }
 
-m8080::m8080()
-    : impl_ { new impl() }
+m8080::m8080(m8080_bus& bus)
+    : impl_ { new impl(bus) }
 {
 }
 
@@ -1079,4 +1082,9 @@ void m8080::write_mem(uint16_t addr, const void* src, uint16_t len)
     while (len--) {
         poke8(addr++, *d++);
     }
+}
+
+void m8080::trace(std::ostream* os)
+{
+    impl_->trace(os);
 }

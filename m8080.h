@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <functional>
 #include <memory>
+#include <vector>
+#include <cassert>
 
 struct m8080_state {
     uint8_t regs[8];
@@ -52,9 +54,45 @@ bool operator==(const m8080_state& l, const m8080_state& r);
 bool operator!=(const m8080_state& l, const m8080_state& r);
 std::ostream& operator<<(std::ostream& os, const m8080_state& state);
 
+class m8080_bus {
+public:
+    virtual uint8_t peek8(uint16_t addr) = 0;
+    virtual void poke8(uint16_t addr, uint8_t val) = 0;
+};
+
+class m8080_mem_bus final : public m8080_bus {
+public:
+    explicit m8080_mem_bus(size_t mem_size)
+        : mem_(mem_size)
+    {
+        assert(mem_size <= 65536);
+    }
+
+    uint8_t peek8(uint16_t addr)
+    {
+        assert(addr < mem_.size());
+        return addr < mem_.size() ? mem_[addr] : 0xFF;
+    }
+
+    void poke8(uint16_t addr, uint8_t val)
+    {
+        assert(addr < mem_.size());
+        if (addr < mem_.size())
+            mem_[addr] = val;
+    }
+
+    std::vector<uint8_t>& mem()
+    {
+        return mem_;
+    }
+
+private:
+    std::vector<uint8_t> mem_;
+};
+
 class m8080 {
 public:
-    explicit m8080();
+    explicit m8080(m8080_bus& bus);
     ~m8080();
 
     m8080_state& state();
@@ -68,9 +106,13 @@ public:
     void poke8(uint16_t addr, uint8_t val);
     void write_mem(uint16_t addr, const void* src, uint16_t len);
 
+    void trace(std::ostream* os);
+
 private:
     class impl;
     std::unique_ptr<impl> impl_;
 };
+
+uint16_t disasm_one(std::ostream& os, m8080_bus& bus, uint16_t pc);
 
 #endif
