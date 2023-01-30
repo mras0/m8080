@@ -58,7 +58,7 @@ void dos_call(m8080& m)
 
 } // unnamed namespace
 
-void run_cpm_test(const char* filename)
+void run_cpm_test(const char* filename, bool trace)
 {
     constexpr uint16_t DOS_ADDR = 0xE400;
     constexpr uint16_t BIOS_ADDR = 0xF200;
@@ -112,7 +112,8 @@ void run_cpm_test(const char* filename)
         std::cout << state.instruction_count << " instructions executed in " << secs << " seconds (" << (state.instruction_count / 1e6) / secs << " MIPS)\n";
         std::cout << state.cycle_count << " clock cycles (" << state.cycle_count / 2e6 << " seconds at 2MHz) " << (state.cycle_count / 2e6)*100/secs << "% compared to real time.\n";
     };
-    //m.trace(&std::cout);
+    if (trace)
+        m.trace(&std::cout);
     try {
         while (!soft_reset) {
             m.step();

@@ -1,9 +1,9 @@
 #include <iostream>
 #include <signal.h>
 #include <chrono>
+#include <thread>
 #include "ioutil.h"
 #include "m8080.h"
-#include "cpm.h"
 #include "display.h"
 
 void disassemble_file(const char* filename, uint16_t load_offset)
@@ -16,15 +16,6 @@ void disassemble_file(const char* filename, uint16_t load_offset)
         pc = disasm_one(std::cout, mem_bus, pc);
     }
 }
-
-void run_cpm_tests()
-{
-    run_cpm_test("../misc/cputest/8080PRE.COM");
-    run_cpm_test("../misc/cputest/TST8080.COM");
-    run_cpm_test("../misc/cputest/8080EXM.COM");
-    run_cpm_test("../misc/cputest/CPUTEST.COM");
-}
-
 
 bool ctrl_c_pressed;
 
@@ -66,7 +57,8 @@ public:
 
         // TODO: Check if this is actually used
         if (addr >= video_ram_end) {
-            throw std::runtime_error { "TODO: peek8(" + hexstring(addr) + ") PC " + hexstring(cpu_.state().pc) };
+            std::cerr << "TODO: peek8(" + hexstring(addr) + ") PC " + hexstring(cpu_.state().pc) << "\n";
+            single_stepping_ = true;
         }
 
         return ram_[addr & (ram_size - 1)];
@@ -74,8 +66,11 @@ public:
 
     void poke8(uint16_t addr, uint8_t val)
     {
-        if (addr < ram_base)
-            throw std::runtime_error { "Write to rom address 0" + hexstring(addr) + "H value 0" + hexstring(val) + "H PC " + hexstring(cpu_.state().pc) };
+        if (addr < ram_base) {
+            std::cerr << "Write to rom address 0" + hexstring(addr) + "H value 0" + hexstring(val) + "H PC " + hexstring(cpu_.state().pc) << "\n";
+            single_stepping_ = true;
+            return;
+        }
 
         if (addr >= video_ram_base && addr < video_ram_end) {
             video_ram_[addr - video_ram_base] = val;
@@ -84,9 +79,8 @@ public:
 
         // TODO: Check if this is actually used
         if (addr >= video_ram_end) {
-            //throw std::runtime_error { "TODO: poke8(" + hexstring(addr) + ", " + hexstring(val) + ") PC " + hexstring(cpu_.state().pc) };
-            std::cerr << "Write to RAM mirror addr=" << hex(addr) << " val=" << hex(val) << " pc = " << hex(cpu_.state().pc) << "\n";
-            return;
+            std::cerr << "TODO: poke8(" + hexstring(addr) + ", " + hexstring(val) + ") PC " + hexstring(cpu_.state().pc) << "\n";
+            single_stepping_ = true;
         }
 
         ram_[addr & (ram_size - 1)] = val;
@@ -96,10 +90,9 @@ public:
     {
         switch (port) {
         case 0:
-            return 0b00001110;
         case 1:
         case 2:
-            return 0;
+            return input_[port];
         case 3:
             return static_cast<uint8_t>((shift_register_ << shift_amount_) >> 8);
         }
@@ -202,6 +195,21 @@ private:
     uint16_t hpos_ = 0;
     int interrupt_inst_ = -1;
     display display_;
+    std::chrono::steady_clock::time_point last_update_ {};
+
+    // Input
+    uint8_t input_[3] = { 0, 0, 0 };
+
+    static constexpr uint8_t i1_credit_mask = 1 << 0;
+    //static constexpr uint8_t i1_p2_start_mask = 1 << 1;
+    static constexpr uint8_t i1_p1_start_mask = 1 << 2;
+    static constexpr uint8_t i1_p1_fire_mask = 1 << 4;
+    static constexpr uint8_t i1_p1_left_mask = 1 << 5;
+    static constexpr uint8_t i1_p1_right_mask = 1 << 6;
+
+    //static constexpr uint8_t i2_p2_fire_mask = 1 << 4;
+    //static constexpr uint8_t i2_p2_left_mask = 1 << 5;
+    //static constexpr uint8_t i2_p2_right_mask = 1 << 6;
 
     // Memory map
     // 0000-1FFF 8K ROM
@@ -328,15 +336,49 @@ void invaders::update_display()
         }
     }
 
+    const std::chrono::duration<double> dt = std::chrono::steady_clock::now() - last_update_;
+    constexpr std::chrono::duration<double> update_interval { static_cast<double>(htotal * vtotal) / pixel_frequency_hz };
+
+#if 0
+    if (dt < update_interval)
+        std::this_thread::sleep_for(update_interval - dt);
+#endif
+
     display_.show(display_data.data());
+
+    // Update input
+
     for (auto evt : display_.events()) {
-        if ((evt & ~event_keyup_mask) == event_quit) {
+        auto apply_mask = [evt](uint8_t& val, uint8_t mask) {
+            if (evt & event_keyup_mask)
+                val &= ~mask;
+            else
+                val |= mask;
+        };
+
+        switch (evt & ~event_keyup_mask)
+        {
+        case event_quit:
             quit_ = true;
-            continue;
+            break;
+        case event_left:
+            apply_mask(input_[1], i1_p1_left_mask);
+            break;
+        case event_right:
+            apply_mask(input_[1], i1_p1_right_mask);
+            break;
+        case ' ':
+            apply_mask(input_[1], i1_p1_fire_mask);
+            break;
+        case 'C':
+            apply_mask(input_[1], i1_credit_mask);
+            break;
+        case '1':
+            apply_mask(input_[1], i1_p1_start_mask);
+            break;
         }
-        if (!single_stepping_)
-            std::cout << "TODO: Handle event 0x" << hex(evt) << "\n";
     }
+    last_update_ = std::chrono::steady_clock::now();
 }
 
 void run_invaders(const char* rom_filename)
@@ -348,7 +390,6 @@ void run_invaders(const char* rom_filename)
 int main()
 {
     try {
-        //run_cpm_tests();
         const char* const rom_filename = "../misc/invaders/invaders.rom";
         run_invaders(rom_filename);
     } catch (const std::exception& e) {
